@@ -69,6 +69,14 @@ Delivery is **at least once**: if the provider accepts and the acknowledgement
 save fails, a later retry can duplicate the email. `queued` acceptance is not
 proof of inbox delivery. Raw provider errors are never printed.
 
+The most recent receipt is checked on subsequent runs. A bounce, skip, status
+API failure or an unconfirmed queued/sent message older than an hour makes the
+job fail visibly while availability/budget checks and pending notices continue
+to be saved. New automatic mail is held to avoid repeatedly sending into a
+rejection. Fix the sender and use `test_email` for a deliberate delivery test.
+GitHub failed-workflow notifications must be enabled separately by the owner;
+they are a secondary diagnostic, not proof that alert mail reaches the inbox.
+
 Public repository logs contain only number of passing checks and mail
 acceptance, never spending amounts or mail addresses. State commits contain
 only ciphertext. Do not upload plaintext state or command-output artifacts.

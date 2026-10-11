@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import {evaluate, initialState, messageFor, HOURS} from './engine.mjs';
 import {encryptState, decryptState, stateStore} from './state.mjs';
 import {normalizeBilling, checkHttp, checkDatabase, checkBilling} from './probes.mjs';
-import {sendMail} from './mail.mjs';
+import {sendMail, checkMailDelivery} from './mail.mjs';
 import {run} from './run.mjs';
 const now = Date.parse('2026-10-11T09:00:00Z');
 const bill = {periodStart: now - 20 * 24 * HOURS, periodEnd: now + 3 * 24 * HOURS,
@@ -139,4 +139,24 @@ test('missing stored state is not silently initialized in normal operation', asy
   const store = stateStore({repo: 'owner/repo', token: 'private-key', key: 'key'},
     async () => new Response('', {status: 404}));
   await assert.rejects(store.load(), /state missing/);
+});
+test('provider delivery failures are recognized without exposing receipt or body', async () => {
+  for (const status of ['soft_bounced', 'hard_bounced', 'skipped']) {
+    assert.deepEqual(await checkMailDelivery({mailToken:'private-key'}, {messageId:'1'},
+      async () => new Response(JSON.stringify({status, to:'private@example.test'}))),
+      {status, failed:true});
+  }
+  assert.deepEqual(await checkMailDelivery({mailToken:'private-key'}, {messageId:'1'},
+    async () => new Response('{"status":"delivered"}')), {status:'delivered', failed:false});
+  assert.deepEqual(await checkMailDelivery({}, {messageId:'1'}), {status:'unavailable', failed:true});
+});
+test('bounced email fails visibly but still saves checks, does not resend into rejection', async () => {
+  let saved = clean(), sent = 0;
+  saved.mailReceipt = {messageId:'1',status:'queued',submittedAt:now};
+  const store = {async load() {return saved;}, async save(s) {saved=structuredClone(s);}};
+  await assert.rejects(run({}, {store, now:now+60000, probe:async()=>healthy(),
+    delivery:async()=>({status:'soft_bounced',failed:true}), mail:async()=>{sent++;}}),
+  {code:'MONITOR_EMAIL_DELIVERY_FAILED'});
+  assert.equal(sent, 0); assert.equal(saved.lastRun, now+60000);
+  assert.equal(saved.mailReceipt.status, 'soft_bounced');
 });
