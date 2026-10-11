@@ -15,5 +15,6 @@ export async function sendMail(config, text, fetcher = fetch) {
   if (!body.id || !['queued', 'sent', 'delivered'].includes(body.status)) {
     throw new Error('Monitoring email not accepted');
   }
-  return {accepted: true}; // Acceptance is not proof of inbox delivery.
+  return {accepted: true, messageId: String(body.id), status: body.status};
+  // Receipt stays in encrypted state. Acceptance is not proof of inbox delivery.
 }

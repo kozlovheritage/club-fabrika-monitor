@@ -22,10 +22,13 @@ export async function run(config, {store = stateStore(config), probe = collect,
   const incident = Object.values(state.checks).some(x => x.active);
   const urgent = incident && (!state.incidentAcceptedAt || now - state.incidentAcceptedAt >= .5 * HOURS);
   if (state.pending.length && (!state.mailAcceptedAt || now - state.mailAcceptedAt >= .5 * HOURS || urgent || testEmail)) {
-    await mail(config, messageFor(state.pending));
+    const receipt = await mail(config, messageFor(state.pending));
     accepted = true;
     state.pending = [];
     state.mailAcceptedAt = now;
+    if (receipt?.messageId) state.mailReceipt = {
+      messageId: receipt.messageId, status: receipt.status, submittedAt: now,
+    };
     if (incident) state.incidentAcceptedAt = now;
     await store.save(state);
   }

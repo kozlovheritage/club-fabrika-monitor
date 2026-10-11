@@ -110,7 +110,7 @@ test('API and mail errors never return raw bodies, accepted queued mail is not d
   await assert.rejects(sendMail(config, 'status', async () =>
     new Response('{"id":1,"status":"rejected"}')), /not accepted/);
   assert.deepEqual(await sendMail(config, 'status', async () =>
-    new Response('{"id":1,"status":"queued"}')), {accepted: true});
+    new Response('{"id":1,"status":"queued"}')), {accepted: true, messageId: '1', status: 'queued'});
 });
 test('outbox saved before mail; failure keeps notification for next run', async () => {
   let saved = clean(), saves = 0;
