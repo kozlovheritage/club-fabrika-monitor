@@ -1,0 +1,41 @@
+name: Club independent monitor
+on:
+  schedule:
+    - cron: '2-57/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      test_email:
+        description: Send a test status email
+        type: boolean
+        default: false
+permissions:
+  contents: write
+concurrency:
+  group: club-monitor
+  cancel-in-progress: false
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Install pinned dependencies
+        run: corepack pnpm@10.26.1 install --frozen-lockfile --ignore-scripts
+      - name: Run policy tests
+        run: node --test *.test.mjs
+      - name: Read-only club checks and aggregated email
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MONITOR_DATABASE_URL: ${{ secrets.MONITOR_DATABASE_URL }}
+          MONITOR_ONREZA_TOKEN: ${{ secrets.MONITOR_ONREZA_TOKEN }}
+          MONITOR_NOTISEND_KEY: ${{ secrets.MONITOR_NOTISEND_KEY }}
+          MONITOR_FROM_EMAIL: ${{ secrets.MONITOR_FROM_EMAIL }}
+          MONITOR_RECIPIENT: ${{ secrets.MONITOR_RECIPIENT }}
+          MONITOR_STATE_KEY: ${{ secrets.MONITOR_STATE_KEY }}
+          MONITOR_TEST_EMAIL: ${{ inputs.test_email }}
+        run: node run.mjs
