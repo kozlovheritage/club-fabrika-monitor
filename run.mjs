@@ -25,12 +25,20 @@ export async function run(config, {store = stateStore(config), probe = collect,
     state.mailReceipt.status = result.status;
     state.mailReceipt.checkedAt = now;
   }
+  // Do not turn a single transient status-API problem into an incident.
+  state.mailStatusReadFailures = deliveryStatus === 'unavailable' ?
+    (state.mailStatusReadFailures || 0) + 1 : 0;
+  if (deliveryStatus === 'unavailable' && state.mailStatusReadFailures < 2) deliveryFailed = false;
+  if (!deliveryFailed && deliveryStatus !== 'unavailable') state.mailFailureSignalledAt = null;
   if (state.pending.length > 500) throw new Error('Monitoring outbox requires intervention');
   await store.save(state); // Persist outbox before attempting delivery.
   let accepted = false;
   const incident = Object.values(state.checks).some(x => x.active);
   const urgent = incident && (!state.incidentAcceptedAt || now - state.incidentAcceptedAt >= .5 * HOURS);
-  if (state.pending.length && (!deliveryFailed || testEmail) &&
+  // Do not overwrite an undelivered receipt with another: that would hide a
+  // continually queued sender under a stream of newer accepted messages.
+  const mailReady = !state.mailReceipt || deliveryStatus === 'delivered' || testEmail;
+  if (state.pending.length && mailReady && (!deliveryFailed || testEmail) &&
       (!state.mailAcceptedAt || now - state.mailAcceptedAt >= .5 * HOURS || urgent || testEmail)) {
     const receipt = await mail(config, messageFor(state.pending));
     accepted = true;
@@ -47,16 +55,21 @@ export async function run(config, {store = stateStore(config), probe = collect,
   if (deliveryFailed) {
     // Keep collecting and saving availability/budget state even if email is broken.
     // Do not retry into a bounce every five minutes. Native Actions failure is visible.
-    const error = new Error('Monitoring email delivery not confirmed');
-    error.code = 'MONITOR_EMAIL_DELIVERY_FAILED';
-    throw error;
+    if (!state.mailFailureSignalledAt || now - state.mailFailureSignalledAt >= 6 * HOURS) {
+      state.mailFailureSignalledAt = now;
+      await store.save(state);
+      const error = new Error('Monitoring email delivery not confirmed');
+      error.code = 'MONITOR_EMAIL_DELIVERY_FAILED';
+      throw error;
+    }
   }
   return {checksPassed: Object.values(observations).filter(x => x.ok).length,
-    checksTotal: 5, accepted, deliveryStatus};
+    checksTotal: 5, accepted, deliveryStatus, emailDeliveryOk: !deliveryFailed && deliveryStatus !== 'unavailable'};
 }
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   try {
     const result = await run(environmentConfig(), {testEmail: process.env.MONITOR_TEST_EMAIL === 'true'});
+    if (!result.emailDeliveryOk) console.warn('::warning::Email delivery incident remains open or status is unconfirmed. Notices remain queued; failure reminders are limited to six-hour intervals.');
     // No amounts, recipient, raw errors, DB addresses or response bodies in public logs.
     console.log(JSON.stringify(result));
   } catch (error) {

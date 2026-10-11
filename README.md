@@ -71,11 +71,15 @@ proof of inbox delivery. Raw provider errors are never printed.
 
 The most recent receipt is checked on subsequent runs. A bounce, skip, status
 API failure or an unconfirmed queued/sent message older than an hour makes the
-job fail visibly while availability/budget checks and pending notices continue
-to be saved. New automatic mail is held to avoid repeatedly sending into a
-rejection. Fix the sender and use `test_email` for a deliberate delivery test.
+job fail visibly (first occurrence and at most once per six hours) while availability/budget checks and pending notices continue
+to be saved. New automatic mail is held until the previous receipt is delivered,
+to avoid repeated rejections or hiding an old queued receipt behind a newer one.
+Fix the sender and use `test_email` for a deliberate delivery test.
 GitHub failed-workflow notifications must be enabled separately by the owner;
 they are a secondary diagnostic, not proof that alert mail reaches the inbox.
+Intervening runs retain an explicit warning and `emailDeliveryOk: false`; a green
+job during an already-signalled incident is not proof of email delivery. One
+transient status-API failure is tolerated; two consecutive failures open an incident.
 
 Public repository logs contain only number of passing checks and mail
 acceptance, never spending amounts or mail addresses. State commits contain

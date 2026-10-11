@@ -159,4 +159,18 @@ test('bounced email fails visibly but still saves checks, does not resend into r
   {code:'MONITOR_EMAIL_DELIVERY_FAILED'});
   assert.equal(sent, 0); assert.equal(saved.lastRun, now+60000);
   assert.equal(saved.mailReceipt.status, 'soft_bounced');
+  const result = await run({}, {store, now:now+120000, probe:async()=>healthy(),
+    delivery:async()=>({status:'soft_bounced',failed:true}), mail:async()=>{sent++;}});
+  assert.equal(result.emailDeliveryOk, false);
+  assert.equal(result.deliveryStatus, 'soft_bounced');
+  assert.equal(sent, 0);
+});
+test('queued receipt is not hidden by a newer email while notices wait', async () => {
+  let saved = clean(), sent = 0;
+  saved.mailReceipt = {messageId:'1',status:'queued',submittedAt:now};
+  const store = {async load() {return saved;}, async save(s) {saved=structuredClone(s);}};
+  const result = await run({}, {store, now:now+60000, probe:async()=>healthy(),
+    delivery:async()=>({status:'queued',failed:false}), mail:async()=>{sent++;}});
+  assert.equal(sent, 0); assert.equal(saved.mailReceipt.messageId, '1');
+  assert.equal(result.deliveryStatus, 'queued');
 });
