@@ -25,7 +25,7 @@ jobs:
         with:
           node-version: '22'
       - name: Install pinned dependencies
-        run: corepack pnpm@10.26.1 install --frozen-lockfile --ignore-scripts
+        run: corepack pnpm install --frozen-lockfile --ignore-scripts
       - name: Run policy tests
         run: node --test *.test.mjs
       - name: Read-only club checks and aggregated email
