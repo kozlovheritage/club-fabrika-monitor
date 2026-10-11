@@ -173,4 +173,5 @@ test('queued receipt is not hidden by a newer email while notices wait', async (
     delivery:async()=>({status:'queued',failed:false}), mail:async()=>{sent++;}});
   assert.equal(sent, 0); assert.equal(saved.mailReceipt.messageId, '1');
   assert.equal(result.deliveryStatus, 'queued');
+  assert.equal(result.emailDeliveryOk, false);
 });

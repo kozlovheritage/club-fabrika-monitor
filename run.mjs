@@ -29,7 +29,7 @@ export async function run(config, {store = stateStore(config), probe = collect,
   state.mailStatusReadFailures = deliveryStatus === 'unavailable' ?
     (state.mailStatusReadFailures || 0) + 1 : 0;
   if (deliveryStatus === 'unavailable' && state.mailStatusReadFailures < 2) deliveryFailed = false;
-  if (!deliveryFailed && deliveryStatus !== 'unavailable') state.mailFailureSignalledAt = null;
+  if (['delivered', 'none'].includes(deliveryStatus)) state.mailFailureSignalledAt = null;
   if (state.pending.length > 500) throw new Error('Monitoring outbox requires intervention');
   await store.save(state); // Persist outbox before attempting delivery.
   let accepted = false;
@@ -64,7 +64,7 @@ export async function run(config, {store = stateStore(config), probe = collect,
     }
   }
   return {checksPassed: Object.values(observations).filter(x => x.ok).length,
-    checksTotal: 5, accepted, deliveryStatus, emailDeliveryOk: !deliveryFailed && deliveryStatus !== 'unavailable'};
+    checksTotal: 5, accepted, deliveryStatus, emailDeliveryOk: ['delivered', 'none'].includes(deliveryStatus)};
 }
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   try {
