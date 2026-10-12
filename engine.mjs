@@ -10,11 +10,17 @@ export function initialState() {
 }
 export function evaluate(previous, observations, now, {testEmail = false} = {}) {
   const state = structuredClone(previous);
+  // Remove old routine reports from the outbox without losing mixed incident
+  // or budget notices. Explicitly requested test messages remain deliverable.
+  state.pending = state.pending.map(notice => ({
+    ...notice,
+    text: notice.text.split('\n\n').filter(paragraph =>
+      !paragraph.startsWith('Ежедневный контроль мониторинга:') &&
+      !paragraph.startsWith('Мониторинг возобновился после перерыва более 30 минут.') &&
+      !paragraph.startsWith('Расход ')).join('\n\n'),
+  })).filter(notice => notice.text.trim());
   const events = [];
   function event(text) { events.push(text); }
-  if (state.lastRun && now - state.lastRun > 30 * 60000) {
-    event('Мониторинг возобновился после перерыва более 30 минут. Доступность клуба в перерыве неизвестна.');
-  }
   for (const [key, label] of Object.entries(labels)) {
     const old = state.checks[key] || {failures: 0, active: false};
     const good = observations[key]?.ok === true;
@@ -69,10 +75,10 @@ export function evaluate(previous, observations, now, {testEmail = false} = {}) 
     state.budget.limit = limit;
     state.budget.latest = {gross, included, extra, projected, at: now, periodEnd};
   }
-  if (!state.heartbeatAt || now - state.heartbeatAt >= 24 * HOURS || testEmail) {
+  if (testEmail) {
     const statuses = Object.entries(labels).map(([key, label]) =>
       `${label}: ${observations[key]?.ok ? 'проверка пройдена' : 'проверка не пройдена'}`);
-    event(`${testEmail ? 'Тест уведомлений' : 'Ежедневный контроль мониторинга'}:\n${statuses.join('\n')}`);
+    event(`Тест уведомлений:\n${statuses.join('\n')}`);
     if (bill) event(`Расход ${(bill.gross / 100).toFixed(2)} ₽; включено ${(bill.included / 100).toFixed(2)} ₽; действующая доплата ${(bill.extra / 100).toFixed(2)} ₽. Период заканчивается ${new Date(bill.periodEnd).toISOString()}.`);
     state.heartbeatAt = now;
   }
@@ -88,5 +94,5 @@ export function messageFor(pending) {
     '\n\nЭто технический мониторинг, не контрольная покупка. ' +
     'БД проверяется отдельным read-only соединением, не через сессию участницы. ' +
     'Оплата, выдача доступа, доставка писем участницам и PDF не проверяются. ' +
-    'Расписание GitHub может задерживаться. Если ежедневного письма нет более суток, проверьте запуски мониторинга.';
+    'Обычные отчёты отключены. Расписание GitHub может задерживаться; отсутствие писем не подтверждает работу мониторинга.';
 }

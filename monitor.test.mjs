@@ -121,7 +121,7 @@ test('outbox saved before mail; failure keeps notification for next run', async 
   await run({}, {store, now: now + 60000, probe: async () => healthy(), mail: async () => {}});
   assert.equal(saved.pending.length, 0); assert.equal(saved.mailAcceptedAt, now + 60000);
 });
-test('mail cooldown aggregates incidents and recovery, gap warning and daily heartbeat', async () => {
+test('mail cooldown aggregates notices; healthy runs stay silent even after long gaps', async () => {
   let saved = {...clean(), mailAcceptedAt: now};
   const store = {async load() {return saved;}, async save(s) {saved = structuredClone(s);}};
   let sent = 0;
@@ -130,9 +130,26 @@ test('mail cooldown aggregates incidents and recovery, gap warning and daily hea
   saved.pending.push({id: '2', createdAt: now, text: 'event'});
   await run({}, {...options, now: now + 2 * 60000}); assert.equal(sent, 1);
   await run({}, {...options, now: now + HOURS}); assert.equal(sent, 2);
-  const daily = evaluate(clean(), healthy(), now + 25 * HOURS);
-  assert.match(daily.pending[0].text, /Ежедневный/); assert.match(daily.pending[0].text, /перерыва/);
-  assert.match(messageFor(daily.pending), /не контрольная покупка/);
+  assert.equal(evaluate(initialState(), healthy(), now).pending.length, 0);
+  const silent = evaluate(clean(), healthy(), now + 25 * HOURS);
+  assert.equal(silent.pending.length, 0);
+  assert.equal(silent.lastRun, now + 25 * HOURS);
+  const explicit = evaluate(silent, healthy(), now + 25 * HOURS, {testEmail: true});
+  assert.match(explicit.pending[0].text, /Тест уведомлений/);
+  assert.match(messageFor(explicit.pending), /не контрольная покупка/);
+  assert.doesNotMatch(messageFor(explicit.pending), /Если ежедневного/);
+});
+test('old queued routine reports are removed but mixed real warnings survive', () => {
+  const state = clean();
+  state.pending = [
+    {id:'routine',text:'Ежедневный контроль мониторинга:\nВсе проверки пройдены.\n\nРасход 100 ₽.'},
+    {id:'mixed',text:'Мониторинг возобновился после перерыва более 30 минут. Доступность клуба в перерыве неизвестна.\n\nМинимальный запрос к БД: восстановлено.\n\nБюджет: использовано 85%.\n\nЕжедневный контроль мониторинга:\nВсе проверки пройдены.\n\nРасход 100 ₽.'},
+  ];
+  const result = evaluate(state, healthy(), now);
+  assert.equal(result.pending.length, 1);
+  assert.equal(result.pending[0].id, 'mixed');
+  assert.equal(result.pending[0].text, 'Минимальный запрос к БД: восстановлено.\n\nБюджет: использовано 85%.');
+  assert.equal(state.pending.length, 2); // Never mutate the loaded checkpoint.
 });
 test('missing stored state is not silently initialized in normal operation', async () => {
   delete process.env.MONITOR_BOOTSTRAP;

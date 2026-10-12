@@ -22,18 +22,20 @@ recipient or credential is retained in checkpoints or printed in logs.
 - An incident requires two failed scheduled runs; one failure is suppressed.
 - Incidents in the same run are combined. Recovery is combined with pending
   notices. Normal email has a 30-minute cooldown; the first confirmed incident
-  may bypass a recent daily status email. Persistent incidents remind at most
+   may bypass a recent notice. Persistent incidents remind at most
   every six hours.
 - Budget milestones: 70%, 85%, 95%, 100% of actual current included + effective
   extra budget. A jump over several milestones sends one notice.
 - Provider forecast and a bounded seven-day history of hourly samples provide
   approximate end-of-period risk detection. Local velocity requires 24 hours
   of history. Period reset clears the old trend and threshold state.
-- One daily status email is a visible heartbeat. If it is absent for more than
-  a day, inspect Actions even if there was no outage message.
-- A resumed run reports gaps over 30 minutes. A stopped GitHub scheduler cannot
-  warn through its own stopped job; enable GitHub's failed-workflow email
-  notifications and check the daily heartbeat.
+- Healthy runs do not send email, including after long scheduler gaps. Daily
+  reports and gap-only notices are disabled by the owner's choice. Old queued
+  routine paragraphs are removed, retaining any real incident or budget warning.
+- Explicit `test_email: true` still sends a test when requested. Ordinary
+  scheduled runs and manual runs with `test_email: false` do not.
+- A stopped GitHub scheduler cannot warn through its own stopped job. Silence
+  is not proof of health; inspect Actions or add an independent heartbeat watcher.
 
 The cron targets five-minute intervals, offset from the hour. **GitHub can delay
 or drop scheduled jobs; there is no guaranteed five-minute response time.**
