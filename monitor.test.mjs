@@ -6,13 +6,22 @@ import {encryptState, decryptState, stateStore} from './state.mjs';
 import {normalizeBilling, checkHttp, checkDatabase, checkBilling, collect, CHECK_CODES} from './probes.mjs';
 import {sendMail, checkMailDelivery} from './mail.mjs';
 import {run} from './run.mjs';
-import {privateRunReport} from './diagnostics.mjs';
+import {privateRunReport, publicFailureCode, FAILURE_CODES} from './diagnostics.mjs';
 const now = Date.parse('2026-10-11T09:00:00Z');
 const bill = {periodStart: now - 20 * 24 * HOURS, periodEnd: now + 3 * 24 * HOURS,
   gross: 91992, included: 250000, extra: 0, forecast: 102832};
 const healthy = () => ({http: {ok: true}, login: {ok: true}, cabinet: {ok: true},
   database: {ok: true}, billing: {ok: true, value: {...bill}}});
 const clean = () => ({...initialState(), heartbeatAt: now, lastRun: now});
+test('public operational failure codes cannot expose raw exception details', () => {
+  for (const code of FAILURE_CODES.filter(code => code !== 'NONE')) {
+    assert.equal(publicFailureCode({code, message: 'private message', cause: 'private cause'}), code);
+  }
+  for (const value of [undefined, null, {}, {code: 'NONE'}, {code: 'private provider error'},
+    {code: {toString: () => 'MONITOR_STATE_LOAD_FAILED'}}, {message: 'private message'}]) {
+    assert.equal(publicFailureCode(value), 'MONITOR_INTERNAL_FAILED');
+  }
+});
 test('brief failure produces no incident; two consecutive failures produce one', () => {
   const obs = healthy(); obs.database.ok = false;
   let s = evaluate(clean(), obs, now);

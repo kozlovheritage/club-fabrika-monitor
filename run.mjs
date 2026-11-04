@@ -3,7 +3,7 @@ import {evaluate, messageFor, HOURS} from './engine.mjs';
 import {collect} from './probes.mjs';
 import {stateStore} from './state.mjs';
 import {sendMail, checkMailDelivery} from './mail.mjs';
-import {diagnosticReport, monitorError, DELIVERY_STATUSES} from './diagnostics.mjs';
+import {diagnosticReport, monitorError, publicFailureCode, DELIVERY_STATUSES} from './diagnostics.mjs';
 export function environmentConfig(env = process.env) {
   return {databaseUrl: env.MONITOR_DATABASE_URL, onrezaToken: env.MONITOR_ONREZA_TOKEN,
     mailToken: env.MONITOR_NOTISEND_KEY, mailFrom: env.MONITOR_FROM_EMAIL,
@@ -115,6 +115,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     // No amounts, recipient, raw errors, DB addresses or response bodies in public logs.
     console.log(JSON.stringify(result));
   } catch (error) {
+    console.error('Club monitor operational failure: ' + publicFailureCode(error));
     console.error(error?.code === 'MONITOR_EMAIL_DELIVERY_FAILED' ?
       'Monitoring email delivery failed or status unavailable. Checks and queued notices were saved. Verify the sender; use test_email only after fixing delivery.' :
       'Club monitoring failed. Check private configuration and GitHub workflow status; no sensitive error details recorded.');

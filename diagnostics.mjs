@@ -13,6 +13,13 @@ export function monitorError(code) {
   });
 }
 
+// Public logs may identify only an operational stage, never a raw exception or
+// private diagnostic report. An unreadable checkpoint cannot store its own error.
+export function publicFailureCode(error) {
+  return FAILURE_CODES.includes(error?.code) && error.code !== 'NONE' ?
+    error.code : 'MONITOR_INTERNAL_FAILED';
+}
+
 function healthSummary(checks) {
   const checksPassed = Object.values(checks).filter(x => x.ok).length;
   const phases = Object.values(checks).map(x => x.phase);
