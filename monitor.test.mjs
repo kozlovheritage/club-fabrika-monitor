@@ -359,7 +359,58 @@ test('probe exceptions and database adapter rejection discard all sensitive deta
   const config = {databaseUrl: sensitive, onrezaToken: sensitive};
   const observations = await collect(config, {fetcher: fail, database: fail});
   assert.deepEqual(observations, Object.fromEntries(
-    Object.keys(CHECK_CODES).map(key => [key, {ok: false}])));
+    Object.keys(CHECK_CODES).filter(key => key !== 'billing').map(key => [key, {ok: false}])));
+});
+test('live collection performs only four checks and never reads or requests billing', async () => {
+  const urls = [];
+  const config = {databaseUrl: 'fake'};
+  Object.defineProperty(config, 'onrezaToken', {get() {throw new Error('Billing must not be used');}});
+  const fetcher = async url => {
+    urls.push(url);
+    assert.ok(url.startsWith('https://platform-clubfabrika3.ru/'));
+    if (url.endsWith('/club')) return new Response(null, {
+      status: 302, headers: {location: '/?login=1'},
+    });
+    if (url.endsWith('/api/health')) return Response.json({ok: true});
+    return new Response('Фабрика <input type="password"><form action="/api/auth/login">');
+  };
+  const observations = await collect(config, {fetcher, database: async () => ({ok: true})});
+  assert.equal(urls.length, 3);
+  assert.deepEqual(Object.keys(observations), ['http', 'login', 'cabinet', 'database']);
+  assert.ok(Object.values(observations).every(value => value.ok));
+  const store = memoryStore();
+  const result = await run({}, {store, now, probe: async () => observations});
+  assert.deepEqual(result, {checksPassed: 4, checksTotal: 4, accepted: false,
+    deliveryStatus: 'none', emailDeliveryOk: true});
+  const report = privateRunReport(store.state);
+  assert.equal(report.health, 'healthy');
+  assert.equal(report.checks.billing, undefined);
+});
+test('billing cutover removes only budget notices and keeps unrelated incidents and receipt evidence', async () => {
+  const previous = clean();
+  previous.checks.billing = {active: true, failures: 5, notifiedAt: now};
+  previous.budget = {notifiedLevel: 95};
+  previous.samples = [{at: now, gross: 10}];
+  previous.mailReceipt = {messageId: 'fake', status: 'delivered', submittedAt: now};
+  previous.pending = [
+    {id: 'mixed', text: 'HTTP-процесс клуба: сбой.\n\nЧтение актуального бюджета ONREZA: сбой продолжается.\n\nБюджет: использовано 95%.\n\nРиск исчерпания бюджета до конца периода: оценка.'},
+    {id: 'budget-only', text: 'Чтение актуального бюджета ONREZA: восстановлено.'},
+  ];
+  const core = healthy(); delete core.billing;
+  const migrated = evaluate(previous, core, now + 1000);
+  assert.equal(migrated.pending.length, 1);
+  assert.equal(migrated.pending[0].text, 'HTTP-процесс клуба: сбой.');
+  assert.equal(migrated.checks.billing, undefined);
+  assert.deepEqual(migrated.budget, {});
+  assert.deepEqual(migrated.samples, []);
+  assert.deepEqual(migrated.mailReceipt, previous.mailReceipt);
+  assert.equal(previous.pending.length, 2);
+  const tested = evaluate(migrated, core, now + 2000, {testEmail: true});
+  assert.doesNotMatch(tested.pending.at(-1).text, /бюджет|ONREZA/i);
+  core.database = {ok: false};
+  const first = evaluate(clean(), core, now);
+  const second = evaluate(first, core, now + 300000);
+  assert.match(second.pending[0].text, /Минимальный запрос к БД/);
 });
 test('private report distinguishes transient mail-status failure, confirmed failure and delivered recovery', async () => {
   const state = clean();

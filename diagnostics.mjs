@@ -22,9 +22,10 @@ export function publicFailureCode(error) {
 
 function healthSummary(checks) {
   const checksPassed = Object.values(checks).filter(x => x.ok).length;
+  const checksTotal = Object.keys(checks).length;
   const phases = Object.values(checks).map(x => x.phase);
-  return {checksPassed, checksTotal: 5,
-    health: checksPassed === 5 ? 'healthy' : checksPassed === 0 ? 'unhealthy' : 'partial',
+  return {checksPassed, checksTotal,
+    health: checksPassed === checksTotal ? 'healthy' : checksPassed === 0 ? 'unhealthy' : 'partial',
     incidentStatus: phases.includes('incident') ? 'confirmed' :
       phases.includes('transient_failure') ? 'suspected' :
         phases.includes('recovered') ? 'recovered' : 'none'};
@@ -46,7 +47,7 @@ export function privateRunReport(state) {
       !['running', 'completed', 'failed'].includes(r.jobStatus) ||
       !FAILURE_CODES.includes(r.failureCode) ||
       (r.jobStatus === 'failed') !== (r.failureCode !== 'NONE') ||
-      !Number.isInteger(r.checksPassed) || r.checksTotal !== 5 ||
+      !Number.isInteger(r.checksPassed) || ![4, 5].includes(r.checksTotal) ||
       !['healthy', 'partial', 'unhealthy'].includes(r.health) ||
       !['none', 'suspected', 'confirmed', 'recovered'].includes(r.incidentStatus) ||
       typeof r.mail?.accepted !== 'boolean' ||
@@ -54,6 +55,7 @@ export function privateRunReport(state) {
       !DELIVERY_STATUSES.includes(r.mail?.deliveryStatus)) return invalid();
   const checks = {};
   for (const [key, code] of Object.entries(CHECK_CODES)) {
+    if (key === 'billing' && r.checksTotal === 4) continue;
     const c = r.checks?.[key];
     if (!c || typeof c.ok !== 'boolean' || c.code !== (c.ok ? 'OK' : code) ||
         !(c.ok ? ['healthy', 'recovered'] : ['transient_failure', 'incident']).includes(c.phase)) {
@@ -66,7 +68,7 @@ export function privateRunReport(state) {
       derived.incidentStatus !== r.incidentStatus ||
       r.mail.emailDeliveryOk !== ['none', 'delivered'].includes(r.mail.deliveryStatus)) return invalid();
   return {version: 1, checkedAt: r.checkedAt, jobStatus: r.jobStatus,
-    failureCode: r.failureCode, checksPassed: r.checksPassed, checksTotal: 5,
+    failureCode: r.failureCode, checksPassed: r.checksPassed, checksTotal: r.checksTotal,
     checks, health: r.health, incidentStatus: r.incidentStatus,
     mail: {accepted: r.mail.accepted, deliveryStatus: r.mail.deliveryStatus,
       emailDeliveryOk: r.mail.emailDeliveryOk}};

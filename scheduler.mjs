@@ -168,11 +168,11 @@ export function safeRunSummary(log) {
     try {
       const v = JSON.parse(line.slice(start).trim());
       if (!Number.isInteger(v.checksPassed) || v.checksPassed < 0 ||
-          v.checksPassed > 5 || v.checksTotal !== 5 ||
+          ![4, 5].includes(v.checksTotal) || v.checksPassed > v.checksTotal ||
           typeof v.accepted !== 'boolean' || typeof v.emailDeliveryOk !== 'boolean' ||
           !['none', 'queued', 'sent', 'delivered', 'skipped', 'soft_bounced',
             'hard_bounced', 'unavailable', 'accepted'].includes(v.deliveryStatus)) continue;
-      return {checksPassed: v.checksPassed, checksTotal: 5, accepted: v.accepted,
+      return {checksPassed: v.checksPassed, checksTotal: v.checksTotal, accepted: v.accepted,
         deliveryStatus: v.deliveryStatus, emailDeliveryOk: v.emailDeliveryOk};
     } catch { /* Ignore raw log content. */ }
   }
@@ -191,8 +191,8 @@ export function regularityEvidence(snapshot, since, count = 3) {
   const confirmed = snapshot.configurationOk === true && executions.length === count && uniqueRuns &&
     executions.every(x => x.dispatchOk && x.runId && x.conclusion === 'success' &&
       Number.isInteger(x.summary?.checksPassed) &&
-      x.summary.checksPassed >= 0 && x.summary.checksPassed <= 5 &&
-      x.summary.checksTotal === 5 && x.summary.emailDeliveryOk === true &&
+      x.summary.checksPassed >= 0 && x.summary.checksPassed <= x.summary.checksTotal &&
+      [4, 5].includes(x.summary.checksTotal) && x.summary.emailDeliveryOk === true &&
       x.summary?.deliveryStatus === 'delivered' &&
       Number.isFinite(Date.parse(x.checkedAt)) &&
       Date.parse(x.checkedAt) >= Date.parse(x.plannedAt) - 1000 &&
@@ -203,7 +203,8 @@ export function regularityEvidence(snapshot, since, count = 3) {
   // Cadence is not health. A completed run that detects an outage must still
   // count as a real check; expose probe health separately, never hide it.
   const allChecksHealthy = executions.length === count &&
-    executions.every(x => x.summary?.checksPassed === 5);
+    executions.every(x => [4, 5].includes(x.summary?.checksTotal) &&
+      x.summary.checksPassed === x.summary.checksTotal);
   return {confirmed, allChecksHealthy, targetIntervalSeconds: 300, toleranceSeconds: 60,
     checkIntervalsSeconds: gaps.map(x => Number.isFinite(x) ? x : null), executions};
 }

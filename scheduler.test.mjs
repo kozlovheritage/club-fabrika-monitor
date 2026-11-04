@@ -2,6 +2,24 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {jobConfiguration, verifyConfiguration, schedulerClient, safeRunSummary,
   regularityEvidence, DISPATCH_URL, JOB_TITLE, readPrivateReport} from './scheduler.mjs';
+
+test('four-check summaries are healthy without counting disabled billing as a failure', () => {
+  const summary = {checksPassed: 4, checksTotal: 4, accepted: false,
+    deliveryStatus: 'delivered', emailDeliveryOk: true};
+  assert.deepEqual(safeRunSummary(JSON.stringify(summary)), summary);
+  assert.equal(safeRunSummary(JSON.stringify({...summary, checksPassed: 5})), null);
+  const since = Date.parse('2026-11-04T20:00:00Z');
+  const snapshot = {configurationOk: true, executions: [0, 1, 2].map(index => ({
+    plannedAt: new Date(since + index * 300000).toISOString(),
+    checkedAt: new Date(since + index * 300000 + 10000).toISOString(),
+    runId: index + 1, dispatchOk: true, conclusion: 'success', summary,
+  }))};
+  const evidence = regularityEvidence(snapshot, new Date(since).toISOString());
+  assert.equal(evidence.confirmed, true);
+  assert.equal(evidence.allChecksHealthy, true);
+  for (const item of snapshot.executions) item.summary = null;
+  assert.equal(regularityEvidence(snapshot, new Date(since).toISOString()).allChecksHealthy, false);
+});
 import {run} from './run.mjs';
 import {initialState} from './engine.mjs';
 import {encryptState, decryptState} from './state.mjs';

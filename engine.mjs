@@ -10,18 +10,30 @@ export function initialState() {
 }
 export function evaluate(previous, observations, now, {testEmail = false} = {}) {
   const state = structuredClone(previous);
+  const billingEnabled = Object.hasOwn(observations, 'billing');
+  if (!billingEnabled) {
+    delete state.checks.billing;
+    state.budget = {};
+    state.samples = [];
+  }
   // Remove old routine reports from the outbox without losing mixed incident
   // or budget notices. Explicitly requested test messages remain deliverable.
   state.pending = state.pending.map(notice => ({
     ...notice,
-    text: notice.text.split('\n\n').filter(paragraph =>
+    text: notice.text.split('\n\n').map(paragraph => billingEnabled ? paragraph :
+      paragraph.split('\n').filter(line => !line.startsWith(labels.billing + ':')).join('\n'))
+      .filter(paragraph => paragraph.trim() &&
       !paragraph.startsWith('Ежедневный контроль мониторинга:') &&
       !paragraph.startsWith('Мониторинг возобновился после перерыва более 30 минут.') &&
-      !paragraph.startsWith('Расход ')).join('\n\n'),
+      !paragraph.startsWith('Расход ') &&
+      (billingEnabled || (!paragraph.startsWith('Бюджет:') &&
+        !paragraph.startsWith('Риск исчерпания бюджета до конца периода:'))))
+      .join('\n\n'),
   })).filter(notice => notice.text.trim());
   const events = [];
   function event(text) { events.push(text); }
   for (const [key, label] of Object.entries(labels)) {
+    if (key === 'billing' && !billingEnabled) continue;
     const old = state.checks[key] || {failures: 0, active: false};
     const good = observations[key]?.ok === true;
     if (good) {
@@ -76,7 +88,8 @@ export function evaluate(previous, observations, now, {testEmail = false} = {}) 
     state.budget.latest = {gross, included, extra, projected, at: now, periodEnd};
   }
   if (testEmail) {
-    const statuses = Object.entries(labels).map(([key, label]) =>
+    const statuses = Object.entries(labels)
+      .filter(([key]) => key !== 'billing' || billingEnabled).map(([key, label]) =>
       `${label}: ${observations[key]?.ok ? 'проверка пройдена' : 'проверка не пройдена'}`);
     event(`Тест уведомлений:\n${statuses.join('\n')}`);
     if (bill) event(`Расход ${(bill.gross / 100).toFixed(2)} ₽; включено ${(bill.included / 100).toFixed(2)} ₽; действующая доплата ${(bill.extra / 100).toFixed(2)} ₽. Период заканчивается ${new Date(bill.periodEnd).toISOString()}.`);

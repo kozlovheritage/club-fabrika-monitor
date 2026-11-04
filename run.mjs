@@ -5,7 +5,7 @@ import {stateStore} from './state.mjs';
 import {sendMail, checkMailDelivery} from './mail.mjs';
 import {diagnosticReport, monitorError, publicFailureCode, DELIVERY_STATUSES} from './diagnostics.mjs';
 export function environmentConfig(env = process.env) {
-  return {databaseUrl: env.MONITOR_DATABASE_URL, onrezaToken: env.MONITOR_ONREZA_TOKEN,
+  return {databaseUrl: env.MONITOR_DATABASE_URL,
     mailToken: env.MONITOR_NOTISEND_KEY, mailFrom: env.MONITOR_FROM_EMAIL,
     recipient: env.MONITOR_RECIPIENT, repo: env.GITHUB_REPOSITORY,
     token: env.GITHUB_TOKEN, key: env.MONITOR_STATE_KEY};
@@ -92,7 +92,7 @@ export async function run(config, {store, probe = collect,
     updateMail(accepted);
     await save();
     return {checksPassed: report.checksPassed,
-      checksTotal: 5, accepted, deliveryStatus, emailDeliveryOk: ['delivered', 'none'].includes(deliveryStatus)};
+      checksTotal: report.checksTotal, accepted, deliveryStatus, emailDeliveryOk: ['delivered', 'none'].includes(deliveryStatus)};
   } catch {
     // Never carry a provider's message, cause, stack or code across this boundary.
     const failure = monitorError(stage);

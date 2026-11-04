@@ -7,7 +7,7 @@ export async function sendMail(config, text, fetcher = fetch) {
     method: 'POST', signal: AbortSignal.timeout(15000),
     headers: {Authorization: 'Bearer ' + config.mailToken, 'Content-Type': 'application/json'},
     body: JSON.stringify({from_email: config.mailFrom, from_name: 'Мониторинг клуба',
-      to: config.recipient, subject: 'Фабрика заготовок: контроль работы и бюджета',
+      to: config.recipient, subject: 'Фабрика заготовок: контроль работы платформы',
       text, payment: 'subscriber_priority'}),
   });
   if (!r.ok) throw new Error('Monitoring email not accepted');

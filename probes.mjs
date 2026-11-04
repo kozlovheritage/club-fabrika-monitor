@@ -7,7 +7,9 @@ export const CHECK_CODES = Object.freeze({
 });
 // No provider messages, URLs, numeric budgets or arbitrary observation fields.
 export function checkStatuses(observations, previous, state) {
-  return Object.fromEntries(Object.entries(CHECK_CODES).map(([key, code]) => {
+  return Object.fromEntries(Object.entries(CHECK_CODES)
+    .filter(([key]) => key !== 'billing' || Object.hasOwn(observations, 'billing'))
+    .map(([key, code]) => {
     const ok = observations[key]?.ok === true;
     return [key, {ok, code: ok ? 'OK' : code,
       phase: ok ? (previous.checks[key]?.active ? 'recovered' : 'healthy') :
@@ -96,10 +98,11 @@ export async function checkBilling(token, fetcher = fetch, now = Date.now()) {
   catch { return {ok: false}; }
 }
 export async function collect(config, {fetcher = fetch, database = checkDatabase} = {}) {
-  const [http, login, cabinet, db, billing] = await Promise.all([
+  // Billing is disabled by owner request. Do not contact the ONREZA billing API
+  // or require its token; legacy billing helpers remain for historical tests.
+  const [http, login, cabinet, db] = await Promise.all([
     checkHttp('http', fetcher), checkHttp('login', fetcher), checkHttp('cabinet', fetcher),
     Promise.resolve().then(() => database(config.databaseUrl)).catch(() => ({ok: false})),
-    checkBilling(config.onrezaToken, fetcher),
   ]);
-  return {http, login, cabinet, database: db, billing};
+  return {http, login, cabinet, database: db};
 }
