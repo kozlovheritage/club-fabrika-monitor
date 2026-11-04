@@ -219,7 +219,7 @@ test('private report identifies each probe, transient failure, incident and reco
       mail: async () => ({messageId: 'fake', status: 'queued'})};
     const first = await run({}, {...options, now});
     assert.deepEqual(first, {checksPassed: 4, checksTotal: 5, accepted: false,
-      deliveryStatus: 'none', emailDeliveryOk: true});
+      deliveryStatus: 'none', emailDeliveryOk: true, mailOperationalOk: true});
     let report = privateRunReport(store.state);
     assert.equal(report.jobStatus, 'completed');
     assert.equal(report.health, 'partial');
@@ -381,7 +381,7 @@ test('live collection performs only four checks and never reads or requests bill
   const store = memoryStore();
   const result = await run({}, {store, now, probe: async () => observations});
   assert.deepEqual(result, {checksPassed: 4, checksTotal: 4, accepted: false,
-    deliveryStatus: 'none', emailDeliveryOk: true});
+    deliveryStatus: 'none', emailDeliveryOk: true, mailOperationalOk: true});
   const report = privateRunReport(store.state);
   assert.equal(report.health, 'healthy');
   assert.equal(report.checks.billing, undefined);

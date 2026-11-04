@@ -40,7 +40,8 @@ recipient or credential is retained in checkpoints or printed in logs.
 - Explicit `test_email: true` still sends a test when requested. Ordinary
   scheduled runs and manual runs with `test_email: false` do not.
 - A stopped GitHub scheduler cannot warn through its own stopped job. Silence
-  is not proof of health; inspect Actions or add an independent heartbeat watcher.
+  is not proof of health. The independent Cronitor heartbeat below detects
+  missing completed checks without relying on GitHub or NotiSend for its email.
 
 The external trigger targets UTC minutes 0, 5, 10, …, 55; the GitHub fallback is
 offset from the hour. **GitHub can delay or drop scheduled jobs, and external
@@ -50,6 +51,36 @@ checks ran or an alert reached its recipient.
 Successful encrypted checkpoint commits also keep the public repository active
 so GitHub's 60-day repository inactivity rule does not normally disable cron.
 This is low-cost best-effort monitoring, not a high-availability SLA.
+
+## Independent worker watchdog
+
+Cronitor's verified free plan watches `club-monitor-runtime`: a heartbeat every
+five minutes plus a five-minute grace period. A missing runner, broken schedule,
+failed dependency install, unreadable checkpoint, or a worker that cannot finish
+will therefore be noticed independently. Absence is detected about ten minutes
+after the last successful worker signal, plus provider evaluation and mail time.
+An explicit failure event does not wait for that deadline.
+
+The workflow runs `monitored-run.mjs`. It sends a healthy `tick` only **after**
+the real probes, alert processing and encrypted checkpoint save have finished.
+Zero healthy platform probes can still mean an operational monitoring worker:
+do not confuse platform health with watchdog health. Normal provider queueing
+and the existing one-read transient mail-status tolerance are not worker
+failures; a persistent confirmed mail-transport failure cannot keep the watchdog
+healthy merely because the six-hour failure-log cooldown has not expired.
+
+Worker exceptions send `fail`; a workflow failure step also covers setup and
+test failures after checkout. If no process can start, the independent deadline
+still applies. Missing or rejected telemetry is a visible job failure, not a
+silently successful heartbeat. No customer data, budgets or exception text is
+sent. The runtime has only a dedicated telemetry-only key; the administrative
+SDK key stays in the operator's protected environment.
+
+Use the owner's email-only default notification list. One initial warning and
+recovery are enabled; repeated warnings are suppressed until recovery. The
+isolated `club-monitor-watchdog-verification` check may be used for testing and
+must remain paused afterward. Never manufacture a success ping to initialize
+the production watchdog: verify an actual completed GitHub run instead.
 
 ## Configuration
 
@@ -64,6 +95,7 @@ Repository Secrets:
 | `MONITOR_RECIPIENT` | Owner-approved notification address |
 | `MONITOR_STATE_KEY` | 32 random bytes, base64, for AES-256-GCM state |
 | `MONITOR_STATE_RECOVERY_KEY` | Protected copy of the current key; manual recovery only |
+| `MONITOR_WATCHDOG_TOKEN` | Cronitor telemetry-only key, never the administrative SDK key |
 
 `GITHUB_TOKEN` is the job's short-lived automatic token. Limit permissions to
 `contents: write`; no pull-request or fork execution. Only trusted repository

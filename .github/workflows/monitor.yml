@@ -32,10 +32,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           MONITOR_DATABASE_URL: ${{ secrets.MONITOR_DATABASE_URL }}
-          MONITOR_ONREZA_TOKEN: ${{ secrets.MONITOR_ONREZA_TOKEN }}
           MONITOR_NOTISEND_KEY: ${{ secrets.MONITOR_NOTISEND_KEY }}
           MONITOR_FROM_EMAIL: ${{ secrets.MONITOR_FROM_EMAIL }}
           MONITOR_RECIPIENT: ${{ secrets.MONITOR_RECIPIENT }}
           MONITOR_STATE_KEY: ${{ secrets.MONITOR_STATE_KEY }}
           MONITOR_TEST_EMAIL: ${{ inputs.test_email }}
-        run: node run.mjs
+          MONITOR_WATCHDOG_TOKEN: ${{ secrets.MONITOR_WATCHDOG_TOKEN }}
+        run: node monitored-run.mjs
+      - name: Report worker or setup failure independently
+        if: ${{ failure() }}
+        env:
+          MONITOR_WATCHDOG_TOKEN: ${{ secrets.MONITOR_WATCHDOG_TOKEN }}
+        run: node heartbeat.mjs fail

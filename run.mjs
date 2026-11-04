@@ -80,7 +80,7 @@ export async function run(config, {store, probe = collect,
       updateMail(accepted);
     }
     if (deliveryFailed) {
-      // Keep collecting and saving availability/budget state even if email is broken.
+      // Keep collecting and saving availability state even if email is broken.
       // Do not retry into a bounce every five minutes. Native Actions failure is visible.
       if (!state.mailFailureSignalledAt || now - state.mailFailureSignalledAt >= 6 * HOURS) {
         state.mailFailureSignalledAt = now;
@@ -92,7 +92,9 @@ export async function run(config, {store, probe = collect,
     updateMail(accepted);
     await save();
     return {checksPassed: report.checksPassed,
-      checksTotal: report.checksTotal, accepted, deliveryStatus, emailDeliveryOk: ['delivered', 'none'].includes(deliveryStatus)};
+      checksTotal: report.checksTotal, accepted, deliveryStatus,
+      emailDeliveryOk: ['delivered', 'none'].includes(deliveryStatus),
+      mailOperationalOk: !deliveryFailed};
   } catch {
     // Never carry a provider's message, cause, stack or code across this boundary.
     const failure = monitorError(stage);
