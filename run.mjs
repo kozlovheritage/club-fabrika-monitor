@@ -3,68 +3,110 @@ import {evaluate, messageFor, HOURS} from './engine.mjs';
 import {collect} from './probes.mjs';
 import {stateStore} from './state.mjs';
 import {sendMail, checkMailDelivery} from './mail.mjs';
+import {diagnosticReport, monitorError, DELIVERY_STATUSES} from './diagnostics.mjs';
 export function environmentConfig(env = process.env) {
   return {databaseUrl: env.MONITOR_DATABASE_URL, onrezaToken: env.MONITOR_ONREZA_TOKEN,
     mailToken: env.MONITOR_NOTISEND_KEY, mailFrom: env.MONITOR_FROM_EMAIL,
     recipient: env.MONITOR_RECIPIENT, repo: env.GITHUB_REPOSITORY,
     token: env.GITHUB_TOKEN, key: env.MONITOR_STATE_KEY};
 }
-export async function run(config, {store = stateStore(config), probe = collect,
+export async function run(config, {store, probe = collect,
   mail = sendMail, delivery = checkMailDelivery, now = Date.now(), testEmail = false} = {}) {
-  let state = await store.load();
-  // Outstanding email survives failed mail transport, process death, and runner replacement.
-  // Aggregate unsent events; one attempt per run, no raw mail response in logs.
-  const observations = await probe(config);
-  state = evaluate(state, observations, now, {testEmail});
-  let deliveryStatus = 'none', deliveryFailed = false;
-  if (state.mailReceipt) {
-    const result = await delivery(config, state.mailReceipt);
-    deliveryStatus = result.status;
-    deliveryFailed = result.failed || (
-      ['queued', 'sent'].includes(result.status) && now - state.mailReceipt.submittedAt > HOURS);
-    state.mailReceipt.status = result.status;
-    state.mailReceipt.checkedAt = now;
-  }
-  // Do not turn a single transient status-API problem into an incident.
-  state.mailStatusReadFailures = deliveryStatus === 'unavailable' ?
-    (state.mailStatusReadFailures || 0) + 1 : 0;
-  if (deliveryStatus === 'unavailable' && state.mailStatusReadFailures < 2) deliveryFailed = false;
-  if (['delivered', 'none'].includes(deliveryStatus)) state.mailFailureSignalledAt = null;
-  if (state.pending.length > 500) throw new Error('Monitoring outbox requires intervention');
-  await store.save(state); // Persist outbox before attempting delivery.
-  let accepted = false;
-  const incident = Object.values(state.checks).some(x => x.active);
-  const urgent = incident && (!state.incidentAcceptedAt || now - state.incidentAcceptedAt >= .5 * HOURS);
-  // Do not overwrite an undelivered receipt with another: that would hide a
-  // continually queued sender under a stream of newer accepted messages.
-  const mailReady = !state.mailReceipt || deliveryStatus === 'delivered' || testEmail;
-  if (state.pending.length && mailReady && (!deliveryFailed || testEmail) &&
-      (!state.mailAcceptedAt || now - state.mailAcceptedAt >= .5 * HOURS || urgent || testEmail)) {
-    const receipt = await mail(config, messageFor(state.pending));
-    accepted = true;
-    state.pending = [];
-    state.mailAcceptedAt = now;
-    if (receipt?.messageId) state.mailReceipt = {
-      messageId: receipt.messageId, status: receipt.status, submittedAt: now,
-    };
-    deliveryStatus = receipt?.status || 'accepted';
-    deliveryFailed = false;
-    if (incident) state.incidentAcceptedAt = now;
+  let state, report, stage = 'MONITOR_STATE_LOAD_FAILED';
+  async function save() {
+    stage = 'MONITOR_STATE_SAVE_FAILED';
+    state.diagnostic = report;
     await store.save(state);
   }
-  if (deliveryFailed) {
-    // Keep collecting and saving availability/budget state even if email is broken.
-    // Do not retry into a bounce every five minutes. Native Actions failure is visible.
-    if (!state.mailFailureSignalledAt || now - state.mailFailureSignalledAt >= 6 * HOURS) {
-      state.mailFailureSignalledAt = now;
-      await store.save(state);
-      const error = new Error('Monitoring email delivery not confirmed');
-      error.code = 'MONITOR_EMAIL_DELIVERY_FAILED';
-      throw error;
+  try {
+    store ??= stateStore(config);
+    state = await store.load();
+    // Outstanding email survives failed mail transport, process death, and runner replacement.
+    // Aggregate unsent events; one attempt per run, no raw mail response in logs.
+    stage = 'MONITOR_PROBES_FAILED';
+    const observations = await probe(config);
+    const previous = state;
+    stage = 'MONITOR_POLICY_FAILED';
+    state = evaluate(previous, observations, now, {testEmail});
+    report = diagnosticReport(observations, previous, state, now);
+    let deliveryStatus = 'none', deliveryFailed = false;
+    function updateMail(accepted) {
+      report.mail = {accepted, deliveryStatus,
+        emailDeliveryOk: ['delivered', 'none'].includes(deliveryStatus)};
     }
+    if (state.mailReceipt) {
+      stage = 'MONITOR_MAIL_STATUS_FAILED';
+      const result = await delivery(config, state.mailReceipt);
+      if (!DELIVERY_STATUSES.includes(result?.status) || typeof result.failed !== 'boolean') {
+        throw monitorError(stage);
+      }
+      deliveryStatus = result.status;
+      deliveryFailed = result.failed || (
+        ['queued', 'sent'].includes(result.status) && now - state.mailReceipt.submittedAt > HOURS);
+      state.mailReceipt.status = result.status;
+      state.mailReceipt.checkedAt = now;
+    }
+    updateMail(false);
+    // Do not turn a single transient status-API problem into an incident.
+    state.mailStatusReadFailures = deliveryStatus === 'unavailable' ?
+      (state.mailStatusReadFailures || 0) + 1 : 0;
+    if (deliveryStatus === 'unavailable' && state.mailStatusReadFailures < 2) deliveryFailed = false;
+    if (['delivered', 'none'].includes(deliveryStatus)) state.mailFailureSignalledAt = null;
+    stage = 'MONITOR_POLICY_FAILED';
+    if (state.pending.length > 500) throw monitorError(stage);
+    let accepted = false;
+    const incident = Object.values(state.checks).some(x => x.active);
+    const urgent = incident && (!state.incidentAcceptedAt || now - state.incidentAcceptedAt >= .5 * HOURS);
+    // Do not overwrite an undelivered receipt with another: that would hide a
+    // continually queued sender under a stream of newer accepted messages.
+    const mailReady = !state.mailReceipt || deliveryStatus === 'delivered' || testEmail;
+    if (state.pending.length && mailReady && (!deliveryFailed || testEmail) &&
+        (!state.mailAcceptedAt || now - state.mailAcceptedAt >= .5 * HOURS || urgent || testEmail)) {
+      await save(); // Persist outbox and private diagnostic before attempting delivery.
+      stage = 'MONITOR_MAIL_SUBMISSION_FAILED';
+      const receipt = await mail(config, messageFor(state.pending));
+      if (receipt && (!receipt.messageId || !['queued', 'sent', 'delivered'].includes(receipt.status))) {
+        throw monitorError(stage);
+      }
+      accepted = true;
+      state.pending = [];
+      state.mailAcceptedAt = now;
+      if (receipt?.messageId) state.mailReceipt = {
+        messageId: receipt.messageId, status: receipt.status, submittedAt: now,
+      };
+      deliveryStatus = receipt?.status || 'accepted';
+      deliveryFailed = false;
+      if (incident) state.incidentAcceptedAt = now;
+      updateMail(accepted);
+    }
+    if (deliveryFailed) {
+      // Keep collecting and saving availability/budget state even if email is broken.
+      // Do not retry into a bounce every five minutes. Native Actions failure is visible.
+      if (!state.mailFailureSignalledAt || now - state.mailFailureSignalledAt >= 6 * HOURS) {
+        state.mailFailureSignalledAt = now;
+        stage = 'MONITOR_EMAIL_DELIVERY_FAILED';
+        throw monitorError(stage);
+      }
+    }
+    report.jobStatus = 'completed';
+    updateMail(accepted);
+    await save();
+    return {checksPassed: report.checksPassed,
+      checksTotal: 5, accepted, deliveryStatus, emailDeliveryOk: ['delivered', 'none'].includes(deliveryStatus)};
+  } catch {
+    // Never carry a provider's message, cause, stack or code across this boundary.
+    const failure = monitorError(stage);
+    if (state && report && stage !== 'MONITOR_STATE_SAVE_FAILED') {
+      report.jobStatus = 'failed';
+      report.failureCode = failure.code;
+      if (['MONITOR_MAIL_STATUS_FAILED', 'MONITOR_MAIL_SUBMISSION_FAILED'].includes(stage)) {
+        report.mail = {accepted: false, deliveryStatus: 'unavailable', emailDeliveryOk: false};
+      }
+      state.diagnostic = report;
+      try {await store.save(state);} catch {throw monitorError('MONITOR_STATE_SAVE_FAILED');}
+    }
+    throw failure;
   }
-  return {checksPassed: Object.values(observations).filter(x => x.ok).length,
-    checksTotal: 5, accepted, deliveryStatus, emailDeliveryOk: ['delivered', 'none'].includes(deliveryStatus)};
 }
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   try {

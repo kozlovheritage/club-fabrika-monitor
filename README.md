@@ -1,6 +1,8 @@
 # Independent club monitor
 
-Runs outside ONREZA on GitHub Actions. No payment, account creation, login as a
+Runs outside ONREZA on GitHub Actions, triggered every five minutes by
+cron-job.org. GitHub's own cron remains a best-effort fallback.
+No payment, account creation, login as a
 member, production app deployment or financial-setting write is performed.
 
 ## Checks
@@ -37,8 +39,11 @@ recipient or credential is retained in checkpoints or printed in logs.
 - A stopped GitHub scheduler cannot warn through its own stopped job. Silence
   is not proof of health; inspect Actions or add an independent heartbeat watcher.
 
-The cron targets five-minute intervals, offset from the hour. **GitHub can delay
-or drop scheduled jobs; there is no guaranteed five-minute response time.**
+The external trigger targets UTC minutes 0, 5, 10, …, 55; the GitHub fallback is
+offset from the hour. **GitHub can delay or drop scheduled jobs, and external
+dispatch still depends on GitHub runner availability. There is no guaranteed
+five-minute response time.** HTTP 204 means a dispatch was accepted, not that
+checks ran or an alert reached its recipient.
 Successful encrypted checkpoint commits also keep the public repository active
 so GitHub's 60-day repository inactivity rule does not normally disable cron.
 This is low-cost best-effort monitoring, not a high-availability SLA.
@@ -87,15 +92,124 @@ Public repository logs contain only number of passing checks and mail
 acceptance, never spending amounts or mail addresses. State commits contain
 only ciphertext. Do not upload plaintext state or command-output artifacts.
 
+### Private per-check diagnostics
+
+The public-log policy is **unchanged**. Individual results are kept only in
+`state.enc` under `diagnostic`, using the existing AES-256-GCM key. No new
+public summary fields, Actions summary, uploaded report or plaintext file is
+introduced. The report is a fixed-field projection, not a copy of provider
+responses, exceptions, configuration, receipts or budget values.
+
+Read it **only from a trusted local terminal**, with `GITHUB_TOKEN` (repository
+contents read access) and `MONITOR_STATE_KEY` supplied through the protected
+environment, never as command-line arguments:
+
+```sh
+node scheduler.mjs private-report
+```
+
+The repository is fixed to this monitor. This command does not need cron-job.org,
+dispatch, database, billing or mail credentials. It only reads and decrypts the
+checkpoint; it does not dispatch, send mail, change the schedule or save state.
+It refuses execution when `GITHUB_ACTIONS=true` or `CI` is enabled. Do not run
+it in public CI, paste its output into public logs or upload it as an artifact.
+It does not print plaintext state, pending notices, message IDs or raw errors.
+
+The version-1 report contains:
+
+- `checkedAt`: run timestamp in Unix milliseconds; this is the **last stored
+  report**, not a live query and not evidence that the scheduler still runs.
+- `jobStatus`: `running`, `completed`, `failed`; `failureCode` is `NONE` or a
+  fixed operational code (state read/save, probe collection, alert policy,
+  mail-status lookup, mail submission, confirmed mail delivery failure or
+  internal failure). Raw exception messages, stacks and causes are discarded.
+- `checks`: exactly `http`, `login`, `cabinet`, `database`, `billing`, each with
+  boolean `ok`, `code` (`OK` or respectively `HTTP_FAILED`, `LOGIN_FAILED`,
+  `CABINET_FAILED`, `DATABASE_FAILED`, `BILLING_FAILED`) and `phase`.
+  Failure codes identify the check, **not** the provider's failure reason.
+- `phase`: `healthy`, `transient_failure` (first consecutive failure),
+  `incident` (at least two consecutive failures), `recovered` (first successful
+  run after a confirmed incident). A single failed check followed by success
+  returns to `healthy`, without an incident or recovery email.
+- `checksPassed` / `checksTotal` and `health`: `healthy` (5/5), `partial` (1–4/5),
+  `unhealthy` (0/5). Partial health does not itself prove a confirmed incident.
+- `incidentStatus`: `confirmed` if any check is in incident, else `suspected`
+  if any has a first failure, else `recovered` if any just recovered, else `none`.
+  Per-check phases preserve simultaneous recovery and a different ongoing fault.
+- `mail`: `accepted` refers only to a submission in **this run**;
+  `deliveryStatus` and `emailDeliveryOk` refer to the latest receipt, which may
+  belong to an older email. `none` means there is no receipt, not that a new
+  email was delivered. `queued`/`sent`/`accepted` do not prove delivery.
+  Failed submission/status operations report `unavailable`, never delivery OK.
+
+A completed job can have `health: partial` and/or unconfirmed mail. A failed
+mail job can have all five checks healthy. Six-hour suppression of repeated
+mail-job failures does not turn the receipt healthy. Existing confirmation,
+cooldown and reminder rules are unchanged.
+
+The report is saved with the existing checkpoint: once for a silent run,
+before submission and again after acceptance for a sending run. A crash after
+the pre-submission save leaves `running`; this does not prove email was or was
+not accepted. If state cannot be read/saved, or probe collection/alert evaluation
+fails before a report can be built, the job fails safely and the stored report
+may remain older. Always compare `checkedAt` with the relevant Actions run.
+Missing diagnostics in older checkpoints is an explicit unavailable result,
+not five assumed successes. No state reset or key rotation is needed.
+
 ## Operations
 
 - Run manually: Actions → Club independent monitor → Run workflow.
 - Use `test_email` for a test email (bypasses cooldown deliberately).
 - Failure: inspect the generic failed job; check Secrets privately and retry.
-- Stop: disable the scheduled workflow. No club data or financial setting is
-  changed by stopping it.
+- Identify the failing check: read `private-report` locally after the separate
+  monitor release. Do not infer the failing component from the public 4/5 count.
+- Stop all checks: disable the cron-job.org job **and** the GitHub workflow.
+  Disabling only cron-job.org leaves GitHub's fallback schedule running.
+  No club data or financial setting is changed by stopping monitoring.
 - Restore: retain `state.enc` and its key, restore monitor code, run manually.
 - Local verification: `node --test *.test.mjs`.
+
+### External trigger administration
+
+The owner approved free cron-job.org and explicitly authorized the existing
+multi-repository GitHub token for this connection after limited-token setup
+failed. Its wider scope is a risk, not a requirement of this tool. Do not
+expand permissions, use it for another service, or copy it into source/logs.
+Repository checks, NotiSend credentials, the recipient and the AES state key
+remain in GitHub Actions Secrets; only the dispatch credential is stored in
+the private cron-job.org job settings. `saveResponses` is disabled.
+
+Administrative commands from the repository root:
+
+```sh
+node scheduler.mjs inspect
+node scheduler.mjs verify 2026-11-04T17:47:02Z
+# Only when intentionally creating/updating the schedule or rotating its token:
+node scheduler.mjs configure
+```
+
+These commands use `CRON_JOB_ORG_API_KEY` and `CLUB_MONITOR_DISPATCH_TOKEN`
+from the process environment. Never put values in command-line arguments.
+`configure` first checks for duplicates and tests GitHub dispatch permission
+with `test_email: false`, then creates or updates only this monitor's job.
+It verifies the saved settings without printing credentials.
+
+`inspect` correlates cron history with unique `workflow_dispatch` runs on
+`main`, actual check-step timestamps and whitelisted run-log summaries.
+`verify` requires at least three consecutive five-minute slots, successfully
+completed monitor runs, distinct run IDs, previously confirmed email delivery, check intervals
+within 300 ± 60 seconds and check-start lag no more than three minutes.
+These tolerances are acceptance checks for the observed sample, not an SLA.
+A manual dispatch alone cannot satisfy this evidence. `confirmed` refers only
+to regularity, not cabinet health. Failed probes still count as completed checks;
+`allChecksHealthy` and the counters expose their failures separately. A green
+workflow is not proof of five healthy probes or a newly delivered warning.
+
+Replacing a Replit Secret does **not** rotate the credential already copied to
+cron-job.org: explicitly run `configure` and confirm subsequent automatic runs.
+Expiry/revocation stops new dispatches. Keep the encrypted state and its key.
+Cron-job.org account notifications are disabled rather than routing warnings to
+an unverified account email; independent heartbeat alerts are separate work.
 
 No automated budget mutation exists. The owner must separately configure the
 approved extra budget in ONREZA. The monitoring allowance follows billing reads,

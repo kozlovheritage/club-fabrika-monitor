@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import {evaluate, initialState, messageFor, HOURS} from './engine.mjs';
 import {encryptState, decryptState, stateStore} from './state.mjs';
-import {normalizeBilling, checkHttp, checkDatabase, checkBilling} from './probes.mjs';
+import {normalizeBilling, checkHttp, checkDatabase, checkBilling, collect, CHECK_CODES} from './probes.mjs';
 import {sendMail, checkMailDelivery} from './mail.mjs';
 import {run} from './run.mjs';
+import {privateRunReport} from './diagnostics.mjs';
 const now = Date.parse('2026-10-11T09:00:00Z');
 const bill = {periodStart: now - 20 * 24 * HOURS, periodEnd: now + 3 * 24 * HOURS,
   gross: 91992, included: 250000, extra: 0, forecast: 102832};
@@ -191,4 +192,198 @@ test('queued receipt is not hidden by a newer email while notices wait', async (
   assert.equal(sent, 0); assert.equal(saved.mailReceipt.messageId, '1');
   assert.equal(result.deliveryStatus, 'queued');
   assert.equal(result.emailDeliveryOk, false);
+});
+
+const sensitive = '999999 private@example.test postgres://user:pass@host/db ' +
+  'provider-secret snapshotToken https://pdf.example/doc?signature=private';
+function memoryStore(state = clean()) {
+  let saved = structuredClone(state);
+  return {async load() {return structuredClone(saved);},
+    async save(s) {saved = structuredClone(s);}, get state() {return saved;}};
+}
+test('private report identifies each probe, transient failure, incident and recovery without public disclosure', async () => {
+  for (const [key, code] of Object.entries(CHECK_CODES)) {
+    const store = memoryStore();
+    const bad = healthy();
+    bad[key] = {ok: false, error: sensitive, value: {snapshotToken: sensitive}};
+    const options = {store, probe: async () => bad,
+      mail: async () => ({messageId: 'fake', status: 'queued'})};
+    const first = await run({}, {...options, now});
+    assert.deepEqual(first, {checksPassed: 4, checksTotal: 5, accepted: false,
+      deliveryStatus: 'none', emailDeliveryOk: true});
+    let report = privateRunReport(store.state);
+    assert.equal(report.jobStatus, 'completed');
+    assert.equal(report.health, 'partial');
+    assert.equal(report.incidentStatus, 'suspected');
+    assert.deepEqual(report.checks[key], {ok: false, code, phase: 'transient_failure'});
+    assert.equal(store.state.pending.length, 0);
+    assert.equal(JSON.stringify(first).includes(code), false);
+    assert.equal(JSON.stringify(report).includes('private'), false);
+
+    const second = await run({}, {...options, now: now + 300000});
+    report = privateRunReport(store.state);
+    assert.equal(report.jobStatus, 'completed'); // Successful execution, unhealthy probe.
+    assert.equal(report.incidentStatus, 'confirmed');
+    assert.equal(report.checks[key].phase, 'incident');
+    assert.equal(second.accepted, true);
+    assert.deepEqual(report.mail, {accepted: true, deliveryStatus: 'queued', emailDeliveryOk: false});
+
+    await run({}, {store, now: now + 600000, probe: async () => healthy(),
+      delivery: async () => ({status: 'delivered', failed: false})});
+    report = privateRunReport(store.state);
+    assert.equal(report.health, 'healthy');
+    assert.equal(report.incidentStatus, 'recovered');
+    assert.deepEqual(report.checks[key], {ok: true, code: 'OK', phase: 'recovered'});
+    assert.equal(report.mail.accepted, false); // Delivery of older mail, no new acceptance.
+    assert.equal(report.mail.emailDeliveryOk, true);
+    await run({}, {store, now: now + 900000, probe: async () => healthy(),
+      delivery: async () => ({status: 'delivered', failed: false})});
+    assert.equal(privateRunReport(store.state).incidentStatus, 'none');
+  }
+});
+test('a lone failure clears silently; mixed recovery and active outage remain distinct', async () => {
+  const store = memoryStore();
+  const bad = healthy(); bad.database.ok = false;
+  await run({}, {store, now, probe: async () => bad});
+  await run({}, {store, now: now + 300000, probe: async () => healthy()});
+  assert.equal(privateRunReport(store.state).incidentStatus, 'none');
+  assert.equal(store.state.pending.length, 0); // Not a confirmed recovery notice.
+  bad.http.ok = false;
+  const options = {store, probe: async () => bad,
+    mail: async () => ({messageId: 'fake', status: 'queued'})};
+  await run({}, {...options, now: now + 600000});
+  await run({}, {...options, now: now + 900000});
+  bad.database.ok = true;
+  await run({}, {...options, now: now + 1200000,
+    delivery: async () => ({status: 'queued', failed: false})});
+  const report = privateRunReport(store.state);
+  assert.equal(report.incidentStatus, 'confirmed');
+  assert.equal(report.checks.database.phase, 'recovered');
+  assert.equal(report.checks.http.phase, 'incident');
+});
+test('all failing probes are unhealthy, and nonboolean truthy status is never a pass', async () => {
+  const store = memoryStore();
+  await run({}, {store, now, probe: async () => Object.fromEntries(
+    Object.keys(CHECK_CODES).map(key => [key, {ok: 'true', error: sensitive}]))});
+  const report = privateRunReport(store.state);
+  assert.equal(report.health, 'unhealthy');
+  assert.equal(report.checksPassed, 0);
+  assert.equal(report.incidentStatus, 'suspected');
+});
+test('exceptions at operational boundaries have fixed codes and no raw message, cause or stack', async () => {
+  const fail = () => {throw Object.assign(new Error(sensitive), {code: sensitive, cause: sensitive});};
+  for (const [options, code] of [
+    [{store: {load: fail}}, 'MONITOR_STATE_LOAD_FAILED'],
+    [{probe: fail}, 'MONITOR_PROBES_FAILED'],
+    [{store: {...memoryStore(), save: fail}}, 'MONITOR_STATE_SAVE_FAILED'],
+    [{testEmail: true, mail: fail}, 'MONITOR_MAIL_SUBMISSION_FAILED'],
+    [{testEmail: true, mail: async () => ({messageId: sensitive, status: sensitive})},
+      'MONITOR_MAIL_SUBMISSION_FAILED'],
+  ]) {
+    const store = memoryStore();
+    await assert.rejects(run({}, {store, now, probe: async () => healthy(), ...options}), error => {
+      assert.equal(error.code, code);
+      assert.equal(error.cause, undefined);
+      assert.equal(error.stack.includes(sensitive), false);
+      return true;
+    });
+    if (code === 'MONITOR_MAIL_SUBMISSION_FAILED') {
+      const report = privateRunReport(store.state);
+      assert.equal(report.jobStatus, 'failed');
+      assert.equal(report.failureCode, code);
+      assert.equal(report.health, 'healthy'); // Mail failure is not club downtime.
+      assert.equal(report.mail.emailDeliveryOk, false);
+      assert.equal(store.state.pending.length, 1);
+    }
+  }
+});
+test('delivery failure report survives thrown job and reminder-suppressed successful job', async () => {
+  const state = clean();
+  state.mailReceipt = {messageId: 'fake', submittedAt: now, status: 'queued'};
+  const store = memoryStore(state);
+  const options = {store, probe: async () => healthy(),
+    delivery: async () => ({status: 'hard_bounced', failed: true})};
+  await assert.rejects(run({}, {...options, now}), {code: 'MONITOR_EMAIL_DELIVERY_FAILED'});
+  let report = privateRunReport(store.state);
+  assert.equal(report.jobStatus, 'failed');
+  assert.equal(report.failureCode, 'MONITOR_EMAIL_DELIVERY_FAILED');
+  assert.equal(report.health, 'healthy');
+  assert.equal(report.mail.emailDeliveryOk, false);
+  await run({}, {...options, now: now + 300000});
+  report = privateRunReport(store.state);
+  assert.equal(report.jobStatus, 'completed');
+  assert.equal(report.failureCode, 'NONE');
+  assert.equal(report.mail.emailDeliveryOk, false);
+});
+test('diagnostic projection strips unapproved fields and rejects injected status/error codes', async () => {
+  const store = memoryStore();
+  await run({}, {store, now, probe: async () => healthy()});
+  const state = store.state;
+  state.diagnostic.secret = state.diagnostic.mail.recipient = sensitive;
+  state.diagnostic.checks.http.error = sensitive;
+  state.diagnostic.checks.extra = {ok: true, error: sensitive};
+  const report = privateRunReport(state);
+  assert.equal(JSON.stringify(report).includes(sensitive), false);
+  assert.equal(Object.keys(report.checks).length, 5);
+  const key = crypto.randomBytes(32).toString('base64');
+  const encrypted = encryptState(state, key);
+  assert.equal(encrypted.includes('HTTP_FAILED'), false);
+  assert.deepEqual(privateRunReport(decryptState(encrypted, key)), report);
+  for (const mutate of [
+    r => {r.failureCode = sensitive;},
+    r => {r.mail.deliveryStatus = sensitive;},
+    r => {r.checks.http.code = sensitive;},
+    r => {r.checks.http.phase = sensitive;},
+    r => {r.checksPassed = 4;},
+    r => {r.health = 'partial';},
+    r => {r.mail.emailDeliveryOk = false;},
+  ]) {
+    const changed = structuredClone(state); mutate(changed.diagnostic);
+    assert.throws(() => privateRunReport(changed), /unavailable or invalid/);
+  }
+  assert.throws(() => privateRunReport(clean()), /unavailable or invalid/);
+});
+test('probe exceptions and database adapter rejection discard all sensitive details', async () => {
+  const fail = () => {throw new Error(sensitive);};
+  assert.deepEqual(await checkHttp('http', fail), {ok: false});
+  assert.deepEqual(await checkBilling('fake', fail), {ok: false});
+  const config = {databaseUrl: sensitive, onrezaToken: sensitive};
+  const observations = await collect(config, {fetcher: fail, database: fail});
+  assert.deepEqual(observations, Object.fromEntries(
+    Object.keys(CHECK_CODES).map(key => [key, {ok: false}])));
+});
+test('private report distinguishes transient mail-status failure, confirmed failure and delivered recovery', async () => {
+  const state = clean();
+  state.mailReceipt = {messageId: 'fake', submittedAt: now, status: 'queued'};
+  const store = memoryStore(state);
+  const options = {store, probe: async () => healthy(),
+    delivery: async () => ({status: 'unavailable', failed: true})};
+  await run({}, {...options, now});
+  assert.equal(privateRunReport(store.state).jobStatus, 'completed');
+  assert.equal(privateRunReport(store.state).mail.emailDeliveryOk, false);
+  await assert.rejects(run({}, {...options, now: now + 300000}),
+    {code: 'MONITOR_EMAIL_DELIVERY_FAILED'});
+  await run({}, {...options, now: now + 600000,
+    delivery: async () => ({status: 'delivered', failed: false})});
+  const report = privateRunReport(store.state);
+  assert.equal(report.jobStatus, 'completed');
+  assert.equal(report.mail.emailDeliveryOk, true);
+  assert.equal(report.health, 'healthy');
+  assert.equal(store.state.mailStatusReadFailures, 0);
+});
+test('thrown or malformed mail status cannot inject raw details or claim successful delivery', async () => {
+  for (const delivery of [
+    async () => {throw new Error(sensitive);},
+    async () => ({status: sensitive, failed: true}),
+  ]) {
+    const state = clean();
+    state.mailReceipt = {messageId: 'fake', submittedAt: now, status: 'queued'};
+    const store = memoryStore(state);
+    await assert.rejects(run({}, {store, now, probe: async () => healthy(), delivery}),
+      {code: 'MONITOR_MAIL_STATUS_FAILED'});
+    const report = privateRunReport(store.state);
+    assert.equal(report.mail.deliveryStatus, 'unavailable');
+    assert.equal(report.mail.emailDeliveryOk, false);
+    assert.equal(JSON.stringify(report).includes(sensitive), false);
+  }
 });

@@ -1,6 +1,19 @@
 import pg from 'pg';
 const BASE = 'https://platform-clubfabrika3.ru';
 const RPC = 'https://api.onreza.ru/trpc/';
+export const CHECK_CODES = Object.freeze({
+  http: 'HTTP_FAILED', login: 'LOGIN_FAILED', cabinet: 'CABINET_FAILED',
+  database: 'DATABASE_FAILED', billing: 'BILLING_FAILED',
+});
+// No provider messages, URLs, numeric budgets or arbitrary observation fields.
+export function checkStatuses(observations, previous, state) {
+  return Object.fromEntries(Object.entries(CHECK_CODES).map(([key, code]) => {
+    const ok = observations[key]?.ok === true;
+    return [key, {ok, code: ok ? 'OK' : code,
+      phase: ok ? (previous.checks[key]?.active ? 'recovered' : 'healthy') :
+        (state.checks[key]?.active ? 'incident' : 'transient_failure')}];
+  }));
+}
 export async function checkHttp(kind, fetcher = fetch) {
   const paths = {http: '/api/health', login: '/?login=1', cabinet: '/club'};
   try {
@@ -85,7 +98,8 @@ export async function checkBilling(token, fetcher = fetch, now = Date.now()) {
 export async function collect(config, {fetcher = fetch, database = checkDatabase} = {}) {
   const [http, login, cabinet, db, billing] = await Promise.all([
     checkHttp('http', fetcher), checkHttp('login', fetcher), checkHttp('cabinet', fetcher),
-    database(config.databaseUrl), checkBilling(config.onrezaToken, fetcher),
+    Promise.resolve().then(() => database(config.databaseUrl)).catch(() => ({ok: false})),
+    checkBilling(config.onrezaToken, fetcher),
   ]);
   return {http, login, cabinet, database: db, billing};
 }
