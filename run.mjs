@@ -113,13 +113,24 @@ export async function run(config, {store, probe = collect,
       failure.diagnostic = safeMailDiagnostic(deliveryDiagnostic);
     }
     if (state && report && stage !== 'MONITOR_STATE_SAVE_FAILED') {
-      report.jobStatus = 'failed';
-      report.failureCode = failure.code;
+      const mailFailure = ['MONITOR_MAIL_STATUS_FAILED', 'MONITOR_MAIL_SUBMISSION_FAILED',
+        'MONITOR_EMAIL_DELIVERY_FAILED'].includes(stage);
+      report.jobStatus = mailFailure ? 'completed' : 'failed';
+      report.failureCode = mailFailure ? 'NONE' : failure.code;
       if (['MONITOR_MAIL_STATUS_FAILED', 'MONITOR_MAIL_SUBMISSION_FAILED'].includes(stage)) {
         report.mail = {accepted: false, deliveryStatus: 'unavailable', emailDeliveryOk: false};
       }
       state.diagnostic = report;
       try {await store.save(state);} catch {throw monitorError('MONITOR_STATE_SAVE_FAILED');}
+    }
+    if (report && ['MONITOR_MAIL_STATUS_FAILED', 'MONITOR_MAIL_SUBMISSION_FAILED',
+      'MONITOR_EMAIL_DELIVERY_FAILED'].includes(stage)) {
+      failure.checksPassed = report.checksPassed;
+      failure.checksTotal = report.checksTotal;
+      failure.accepted = report.mail?.accepted === true;
+      failure.deliveryStatus = report.mail?.deliveryStatus || 'unavailable';
+      failure.emailDeliveryOk = report.mail?.emailDeliveryOk === true;
+      failure.deliveryDiagnostic = safeMailDiagnostic(deliveryDiagnostic);
     }
     throw failure;
   }

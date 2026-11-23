@@ -47,32 +47,37 @@ test('failed platform probes do not imply a dead monitoring worker', async () =>
     signal: async state => {signals.push(state); return true;}});
   assert.deepEqual(signals, ['tick']);
 });
-test('checkpoint/probe/transport failures report failure, never a healthy heartbeat', async () => {
+test('checkpoint and probe failures report failure, never a healthy heartbeat', async () => {
   const signals = [];
   const failure = Object.assign(new Error('PRIVATE_STATE_DETAIL'), {code: 'MONITOR_STATE_LOAD_FAILED'});
   await assert.rejects(execute({}, {token, monitor: async () => {throw failure;},
     signal: async state => {signals.push(state); return true;}}), failure);
   assert.deepEqual(signals, ['fail']);
-  signals.length = 0;
-  await assert.rejects(execute({}, {token, monitor: async () => ({...healthy, mailOperationalOk: false}),
-    signal: async state => {signals.push(state); return true;}}),
-  {code: 'MONITOR_EMAIL_DELIVERY_FAILED'});
-  assert.deepEqual(signals, ['fail']);
 });
-test('provider queueing is not an outage; persistent confirmed transport failure cannot recover the watchdog', async () => {
+test('email-delivery failure remains visible but does not mark the worker watchdog red', async () => {
   const signals = [];
-  await execute({}, {token, monitor: async () => ({...healthy,
-    deliveryStatus: 'queued', emailDeliveryOk: false}),
+  const result = await execute({}, {token, monitor: async () => ({...healthy,
+    deliveryStatus: 'unavailable', emailDeliveryOk: false, mailOperationalOk: false,
+    deliveryDiagnostic:'NOTISEND_HTTP_401'}),
   signal: async state => {signals.push(state); return true;}});
   assert.deepEqual(signals, ['tick']);
-  signals.length = 0;
-  await assert.rejects(execute({}, {token, monitor: async () => ({...healthy,
-    deliveryStatus: 'queued', emailDeliveryOk: false, mailOperationalOk: false,
-    deliveryDiagnostic:'NOTISEND_HTTP_429'}),
-  signal: async state => {signals.push(state); return true;}}), error =>
-    error.code === 'MONITOR_EMAIL_DELIVERY_FAILED' &&
-    error.diagnostic === 'NOTISEND_HTTP_429');
-  assert.deepEqual(signals, ['fail']);
+  assert.equal(result.watchdogConfirmed, true);
+  assert.equal(result.mailOperationalOk, false);
+  assert.equal(result.deliveryDiagnostic, 'NOTISEND_HTTP_401');
+});
+test('saved mail-only failures keep a green worker signal and expose only safe summary fields', async () => {
+  const signals = [];
+  const result = await execute({}, {token, monitor: async () => {throw Object.assign(
+    new Error('private provider response'), {code:'MONITOR_EMAIL_DELIVERY_FAILED',
+      checksPassed:3, checksTotal:4, deliveryStatus:'hard_bounced',
+      emailDeliveryOk:false, deliveryDiagnostic:'MESSAGE_HARD_BOUNCED',
+      recipient:'private@example.test'});},
+  signal: async state => {signals.push(state); return true;}});
+  assert.deepEqual(signals, ['tick']);
+  assert.deepEqual(result, {checksPassed:3, checksTotal:4, accepted:false,
+    deliveryStatus:'hard_bounced', emailDeliveryOk:false, mailOperationalOk:false,
+    deliveryDiagnostic:'MESSAGE_HARD_BOUNCED', watchdogConfirmed:true});
+  assert.equal(JSON.stringify(result).includes('private'), false);
 });
 test('failed heartbeat submission fails visibly without discarding the completed worker result', async () => {
   let persisted = false;

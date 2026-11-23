@@ -1,11 +1,16 @@
 import {fileURLToPath} from 'node:url';
 import {run, environmentConfig} from './run.mjs';
-import {publicFailureCode} from './diagnostics.mjs';
+import {DELIVERY_STATUSES, publicFailureCode} from './diagnostics.mjs';
 import {safeMailDiagnostic} from './mail.mjs';
 import {postHeartbeat} from './heartbeat.mjs';
 
 const heartbeatError = () => Object.assign(new Error('Watchdog signal not confirmed'),
   {code: 'MONITOR_HEARTBEAT_FAILED'});
+const MAIL_FAILURE_CODES = new Set([
+  'MONITOR_MAIL_STATUS_FAILED',
+  'MONITOR_MAIL_SUBMISSION_FAILED',
+  'MONITOR_EMAIL_DELIVERY_FAILED',
+]);
 
 export async function execute(config, {monitor = run, signal = postHeartbeat,
   token, monitorOptions = {}} = {}) {
@@ -14,14 +19,23 @@ export async function execute(config, {monitor = run, signal = postHeartbeat,
     // This resolves only after actual probes, alert policy, and checkpoint save.
     // A failed platform probe is NOT a failed monitoring worker.
     result = await monitor(config, monitorOptions);
-    if (result.mailOperationalOk !== true) {
-      throw Object.assign(new Error('Monitoring mail transport remains failed'),
-        {code: 'MONITOR_EMAIL_DELIVERY_FAILED',
-          diagnostic: safeMailDiagnostic(result.deliveryDiagnostic)});
-    }
   } catch (error) {
-    try {await signal('fail', {token});} catch { /* Independent timeout remains armed. */ }
-    throw error;
+    if (!MAIL_FAILURE_CODES.has(error?.code)) {
+      try {await signal('fail', {token});} catch { /* Independent timeout remains armed. */ }
+      throw error;
+    }
+    // The run persists probe results before surfacing mail-only failures.
+    // Cronitor tracks worker completion, not third-party email delivery.
+    result = {
+      checksPassed: error.checksPassed,
+      checksTotal: error.checksTotal,
+      accepted: error.accepted === true,
+      deliveryStatus: DELIVERY_STATUSES.includes(error.deliveryStatus) ?
+        error.deliveryStatus : 'unavailable',
+      emailDeliveryOk: error.emailDeliveryOk === true,
+      mailOperationalOk: false,
+      deliveryDiagnostic: safeMailDiagnostic(error.deliveryDiagnostic),
+    };
   }
   let confirmed = false;
   try {confirmed = await signal('tick', {token});} catch { /* Do not expose raw errors. */ }
@@ -35,6 +49,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       token: process.env.MONITOR_WATCHDOG_TOKEN,
       monitorOptions: {testEmail: process.env.MONITOR_TEST_EMAIL === 'true'},
     });
+    if (result.mailOperationalOk === false) {
+      console.warn('Monitoring probes completed; NotiSend needs attention. ' +
+        'Delivery diagnosis: ' + safeMailDiagnostic(result.deliveryDiagnostic));
+    }
     console.log(JSON.stringify(result));
   } catch (error) {
     console.error('Club monitor operational failure: ' +

@@ -62,12 +62,12 @@ after the last successful worker signal, plus provider evaluation and mail time.
 An explicit failure event does not wait for that deadline.
 
 The workflow runs `monitored-run.mjs`. It sends a healthy `tick` only **after**
-the real probes, alert processing and encrypted checkpoint save have finished.
-Zero healthy platform probes can still mean an operational monitoring worker:
-do not confuse platform health with watchdog health. Normal provider queueing
-and the existing one-read transient mail-status tolerance are not worker
-failures; a persistent confirmed mail-transport failure cannot keep the watchdog
-healthy merely because the six-hour failure-log cooldown has not expired.
+the real probes and encrypted checkpoint save have finished. Zero healthy
+platform probes can still mean an operational monitoring worker: do not confuse
+platform health with watchdog health. NotiSend failures remain visible in the
+workflow summary and private report, and pending notices remain queued, but a
+mail-only failure does not make Cronitor red. A green Cronitor status confirms
+the worker ran; it does not confirm the club is healthy or an email was delivered.
 
 Worker exceptions send `fail`; a workflow failure step also covers setup and
 test failures after checkout. If no process can start, the independent deadline
@@ -123,11 +123,12 @@ save fails, a later retry can duplicate the email. `queued` acceptance is not
 proof of inbox delivery. Raw provider errors are never printed.
 
 The most recent receipt is checked on subsequent runs. A bounce, skip, status
-API failure or an unconfirmed queued/sent message older than an hour makes the
-job fail visibly (first occurrence and at most once per six hours) while availability/budget checks and pending notices continue
-to be saved. New automatic mail is held until the previous receipt is delivered,
-to avoid repeated rejections or hiding an old queued receipt behind a newer one.
-Fix the sender and use `test_email` for a deliberate delivery test.
+API failure or an unconfirmed queued/sent message older than an hour is reported
+in the run summary and private report (first occurrence and at most once per six
+hours) while availability checks and pending notices continue to be saved. New
+automatic mail is held until the previous receipt is delivered, to avoid
+repeated rejections or hiding an old queued receipt behind a newer one. A mail
+failure does not invalidate the independent worker heartbeat.
 GitHub failed-workflow notifications must be enabled separately by the owner;
 they are a secondary diagnostic, not proof that alert mail reaches the inbox.
 Intervening runs retain an explicit warning and `emailDeliveryOk: false`; a green
@@ -193,10 +194,10 @@ The version-1 report contains:
   email was delivered. `queued`/`sent`/`accepted` do not prove delivery.
   Failed submission/status operations report `unavailable`, never delivery OK.
 
-A completed job can have `health: partial` and/or unconfirmed mail. A failed
-mail job can have all five checks healthy. Six-hour suppression of repeated
-mail-job failures does not turn the receipt healthy. Existing confirmation,
-cooldown and reminder rules are unchanged.
+A completed job can have `health: partial` and/or unconfirmed mail. A mail
+problem can coexist with healthy checks and a successful worker heartbeat.
+Six-hour suppression of repeated mail warnings does not turn the receipt
+healthy. Existing confirmation, cooldown and reminder rules are unchanged.
 
 The report is saved with the existing checkpoint: once for a silent run,
 before submission and again after acceptance for a sending run. A crash after

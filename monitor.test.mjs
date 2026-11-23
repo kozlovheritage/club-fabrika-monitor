@@ -208,19 +208,23 @@ test('NotiSend diagnosis contains only allowlisted categories, never provider re
     assert.equal(safeMailDiagnostic(value),'NOTISEND_UNKNOWN');
   }
 });
-test('bounced email fails visibly but still saves checks, does not resend into rejection', async () => {
+test('bounced email remains visible without blocking saved checks or resending into rejection', async () => {
   let saved = clean(), sent = 0;
   saved.mailReceipt = {messageId:'1',status:'queued',submittedAt:now};
   const store = {async load() {return saved;}, async save(s) {saved=structuredClone(s);}};
-  await assert.rejects(run({}, {store, now:now+60000, probe:async()=>healthy(),
-    delivery:async()=>({status:'soft_bounced',failed:true}), mail:async()=>{sent++;}}),
-  {code:'MONITOR_EMAIL_DELIVERY_FAILED'});
+  await assert.rejects(
+    run({}, {store, now:now+60000, probe:async()=>healthy(),
+      delivery:async()=>({status:'soft_bounced',failed:true}), mail:async()=>{sent++;}}),
+    error => error.code === 'MONITOR_EMAIL_DELIVERY_FAILED' &&
+      error.deliveryDiagnostic === 'MESSAGE_SOFT_BOUNCED' &&
+      error.checksPassed === 5);
+  assert.equal(privateRunReport(saved).jobStatus, 'completed');
   assert.equal(sent, 0); assert.equal(saved.lastRun, now+60000);
   assert.equal(saved.mailReceipt.status, 'soft_bounced');
-  const result = await run({}, {store, now:now+120000, probe:async()=>healthy(),
+  const later = await run({}, {store, now:now+120000, probe:async()=>healthy(),
     delivery:async()=>({status:'soft_bounced',failed:true}), mail:async()=>{sent++;}});
-  assert.equal(result.emailDeliveryOk, false);
-  assert.equal(result.deliveryStatus, 'soft_bounced');
+  assert.equal(later.emailDeliveryOk, false);
+  assert.equal(later.deliveryStatus, 'soft_bounced');
   assert.equal(sent, 0);
 });
 test('queued receipt is not hidden by a newer email while notices wait', async () => {
@@ -329,15 +333,15 @@ test('exceptions at operational boundaries have fixed codes and no raw message, 
     });
     if (code === 'MONITOR_MAIL_SUBMISSION_FAILED') {
       const report = privateRunReport(store.state);
-      assert.equal(report.jobStatus, 'failed');
-      assert.equal(report.failureCode, code);
+      assert.equal(report.jobStatus, 'completed');
+      assert.equal(report.failureCode, 'NONE');
       assert.equal(report.health, 'healthy'); // Mail failure is not club downtime.
       assert.equal(report.mail.emailDeliveryOk, false);
       assert.equal(store.state.pending.length, 1);
     }
   }
 });
-test('delivery failure report survives thrown job and reminder-suppressed successful job', async () => {
+test('delivery failure report survives while saved probe runs stay completed', async () => {
   const state = clean();
   state.mailReceipt = {messageId: 'fake', submittedAt: now, status: 'queued'};
   const store = memoryStore(state);
@@ -345,10 +349,12 @@ test('delivery failure report survives thrown job and reminder-suppressed succes
     delivery: async () => ({status: 'hard_bounced', failed: true})};
   await assert.rejects(run({}, {...options, now}), error =>
     error.code === 'MONITOR_EMAIL_DELIVERY_FAILED' &&
-    error.diagnostic === 'MESSAGE_HARD_BOUNCED');
+    error.diagnostic === 'MESSAGE_HARD_BOUNCED' &&
+    error.checksPassed === 5 && error.checksTotal === 5 &&
+    error.deliveryStatus === 'hard_bounced');
   let report = privateRunReport(store.state);
-  assert.equal(report.jobStatus, 'failed');
-  assert.equal(report.failureCode, 'MONITOR_EMAIL_DELIVERY_FAILED');
+  assert.equal(report.jobStatus, 'completed');
+  assert.equal(report.failureCode, 'NONE');
   assert.equal(report.health, 'healthy');
   assert.equal(report.mail.emailDeliveryOk, false);
   await run({}, {...options, now: now + 300000});
