@@ -76,6 +76,12 @@ silently successful heartbeat. No customer data, budgets or exception text is
 sent. The runtime has only a dedicated telemetry-only key; the administrative
 SDK key stays in the operator's protected environment.
 
+When a monitoring email cannot be confirmed, GitHub Actions logs include only a
+fixed NotiSend diagnostic category (for example, an HTTP status, timeout,
+network failure, or bounced/overdue message state). They never include message
+IDs, recipient addresses, email content, credentials, or provider response
+bodies.
+
 Use the owner's email-only default notification list. One initial warning and
 recovery are enabled; repeated warnings are suppressed until recovery. The
 isolated `club-monitor-watchdog-verification` check may be used for testing and

@@ -1,6 +1,7 @@
 import {fileURLToPath} from 'node:url';
 import {run, environmentConfig} from './run.mjs';
 import {publicFailureCode} from './diagnostics.mjs';
+import {safeMailDiagnostic} from './mail.mjs';
 import {postHeartbeat} from './heartbeat.mjs';
 
 const heartbeatError = () => Object.assign(new Error('Watchdog signal not confirmed'),
@@ -15,7 +16,8 @@ export async function execute(config, {monitor = run, signal = postHeartbeat,
     result = await monitor(config, monitorOptions);
     if (result.mailOperationalOk !== true) {
       throw Object.assign(new Error('Monitoring mail transport remains failed'),
-        {code: 'MONITOR_EMAIL_DELIVERY_FAILED'});
+        {code: 'MONITOR_EMAIL_DELIVERY_FAILED',
+          diagnostic: safeMailDiagnostic(result.deliveryDiagnostic)});
     }
   } catch (error) {
     try {await signal('fail', {token});} catch { /* Independent timeout remains armed. */ }
@@ -37,6 +39,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   } catch (error) {
     console.error('Club monitor operational failure: ' +
       (error?.code === 'MONITOR_HEARTBEAT_FAILED' ? error.code : publicFailureCode(error)));
+    if (error?.code === 'MONITOR_EMAIL_DELIVERY_FAILED' ||
+        error?.code === 'MONITOR_MAIL_STATUS_FAILED') {
+      console.error('NotiSend delivery diagnosis: ' + safeMailDiagnostic(error.diagnostic));
+    }
     process.exitCode = 1;
   }
 }

@@ -2,7 +2,7 @@ import {fileURLToPath} from 'node:url';
 import {evaluate, messageFor, HOURS} from './engine.mjs';
 import {collect} from './probes.mjs';
 import {stateStore} from './state.mjs';
-import {sendMail, checkMailDelivery} from './mail.mjs';
+import {sendMail, checkMailDelivery, safeMailDiagnostic} from './mail.mjs';
 import {diagnosticReport, monitorError, publicFailureCode, DELIVERY_STATUSES} from './diagnostics.mjs';
 export function environmentConfig(env = process.env) {
   return {databaseUrl: env.MONITOR_DATABASE_URL,
@@ -13,6 +13,7 @@ export function environmentConfig(env = process.env) {
 export async function run(config, {store, probe = collect,
   mail = sendMail, delivery = checkMailDelivery, now = Date.now(), testEmail = false} = {}) {
   let state, report, stage = 'MONITOR_STATE_LOAD_FAILED';
+  let deliveryDiagnostic = 'NOTISEND_UNKNOWN';
   async function save() {
     stage = 'MONITOR_STATE_SAVE_FAILED';
     state.diagnostic = report;
@@ -38,11 +39,20 @@ export async function run(config, {store, probe = collect,
       stage = 'MONITOR_MAIL_STATUS_FAILED';
       const result = await delivery(config, state.mailReceipt);
       if (!DELIVERY_STATUSES.includes(result?.status) || typeof result.failed !== 'boolean') {
+        deliveryDiagnostic = 'NOTISEND_UNSUPPORTED_STATUS';
         throw monitorError(stage);
       }
       deliveryStatus = result.status;
+      if (result.status === 'unavailable') {
+        deliveryDiagnostic = safeMailDiagnostic(result.diagnostic);
+      } else if (['skipped', 'soft_bounced', 'hard_bounced'].includes(result.status)) {
+        deliveryDiagnostic = `MESSAGE_${result.status.toUpperCase()}`;
+      }
       deliveryFailed = result.failed || (
         ['queued', 'sent'].includes(result.status) && now - state.mailReceipt.submittedAt > HOURS);
+      if (deliveryFailed && ['queued', 'sent'].includes(result.status)) {
+        deliveryDiagnostic = `MESSAGE_${result.status.toUpperCase()}_OVER_1H`;
+      }
       state.mailReceipt.status = result.status;
       state.mailReceipt.checkedAt = now;
     }
@@ -94,10 +104,14 @@ export async function run(config, {store, probe = collect,
     return {checksPassed: report.checksPassed,
       checksTotal: report.checksTotal, accepted, deliveryStatus,
       emailDeliveryOk: ['delivered', 'none'].includes(deliveryStatus),
-      mailOperationalOk: !deliveryFailed};
+        mailOperationalOk: !deliveryFailed,
+        ...(deliveryFailed ? {deliveryDiagnostic: safeMailDiagnostic(deliveryDiagnostic)} : {})};
   } catch {
     // Never carry a provider's message, cause, stack or code across this boundary.
     const failure = monitorError(stage);
+    if (['MONITOR_MAIL_STATUS_FAILED', 'MONITOR_EMAIL_DELIVERY_FAILED'].includes(stage)) {
+      failure.diagnostic = safeMailDiagnostic(deliveryDiagnostic);
+    }
     if (state && report && stage !== 'MONITOR_STATE_SAVE_FAILED') {
       report.jobStatus = 'failed';
       report.failureCode = failure.code;

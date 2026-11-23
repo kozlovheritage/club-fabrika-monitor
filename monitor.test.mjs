@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import {evaluate, initialState, messageFor, HOURS} from './engine.mjs';
 import {encryptState, decryptState, stateStore} from './state.mjs';
 import {normalizeBilling, checkHttp, checkDatabase, checkBilling, collect, CHECK_CODES} from './probes.mjs';
-import {sendMail, checkMailDelivery} from './mail.mjs';
+import {sendMail, checkMailDelivery, safeMailDiagnostic} from './mail.mjs';
 import {run} from './run.mjs';
 import {privateRunReport, publicFailureCode, FAILURE_CODES} from './diagnostics.mjs';
 const now = Date.parse('2026-10-11T09:00:00Z');
@@ -175,7 +175,38 @@ test('provider delivery failures are recognized without exposing receipt or body
   }
   assert.deepEqual(await checkMailDelivery({mailToken:'private-key'}, {messageId:'1'},
     async () => new Response('{"status":"delivered"}')), {status:'delivered', failed:false});
-  assert.deepEqual(await checkMailDelivery({}, {messageId:'1'}), {status:'unavailable', failed:true});
+  assert.deepEqual(await checkMailDelivery({}, {messageId:'1'}), {
+    status:'unavailable', failed:true, diagnostic:'NOTISEND_INVALID_CONFIG',
+  });
+});
+test('NotiSend diagnosis contains only allowlisted categories, never provider response content', async () => {
+  const config = {mailToken:'private-key'}, receipt = {messageId:'1'};
+  for (const [status, diagnostic] of [[401,'NOTISEND_HTTP_401'],[429,'NOTISEND_HTTP_429'],
+    [503,'NOTISEND_HTTP_503']]) {
+    assert.deepEqual(await checkMailDelivery(config, receipt, async () =>
+      new Response(JSON.stringify({error:'private response',to:'private@example.test'}),{status})),
+    {status:'unavailable',failed:true,diagnostic});
+  }
+  assert.deepEqual(await checkMailDelivery(config, receipt, async () => {
+    throw Object.assign(new Error('private network message'),{name:'TimeoutError'});
+  }), {status:'unavailable',failed:true,diagnostic:'NOTISEND_TIMEOUT'});
+  assert.deepEqual(await checkMailDelivery(config, receipt, async () => {
+    throw new Error('private network message');
+  }), {status:'unavailable',failed:true,diagnostic:'NOTISEND_NETWORK_ERROR'});
+  assert.deepEqual(await checkMailDelivery(config, receipt, async () =>
+    new Response('private malformed body')), {
+    status:'unavailable',failed:true,diagnostic:'NOTISEND_INVALID_JSON',
+  });
+  assert.deepEqual(await checkMailDelivery(config, receipt, async () =>
+    Response.json({status:'private provider status',to:'private@example.test'})), {
+    status:'unavailable',failed:true,diagnostic:'NOTISEND_UNSUPPORTED_STATUS',
+  });
+  for (const value of ['NOTISEND_HTTP_401','MESSAGE_HARD_BOUNCED','MESSAGE_QUEUED_OVER_1H']) {
+    assert.equal(safeMailDiagnostic(value),value);
+  }
+  for (const value of ['private@example.test','private response','NOTISEND_HTTP_200']) {
+    assert.equal(safeMailDiagnostic(value),'NOTISEND_UNKNOWN');
+  }
 });
 test('bounced email fails visibly but still saves checks, does not resend into rejection', async () => {
   let saved = clean(), sent = 0;
@@ -312,7 +343,9 @@ test('delivery failure report survives thrown job and reminder-suppressed succes
   const store = memoryStore(state);
   const options = {store, probe: async () => healthy(),
     delivery: async () => ({status: 'hard_bounced', failed: true})};
-  await assert.rejects(run({}, {...options, now}), {code: 'MONITOR_EMAIL_DELIVERY_FAILED'});
+  await assert.rejects(run({}, {...options, now}), error =>
+    error.code === 'MONITOR_EMAIL_DELIVERY_FAILED' &&
+    error.diagnostic === 'MESSAGE_HARD_BOUNCED');
   let report = privateRunReport(store.state);
   assert.equal(report.jobStatus, 'failed');
   assert.equal(report.failureCode, 'MONITOR_EMAIL_DELIVERY_FAILED');
@@ -417,12 +450,13 @@ test('private report distinguishes transient mail-status failure, confirmed fail
   state.mailReceipt = {messageId: 'fake', submittedAt: now, status: 'queued'};
   const store = memoryStore(state);
   const options = {store, probe: async () => healthy(),
-    delivery: async () => ({status: 'unavailable', failed: true})};
+    delivery: async () => ({status: 'unavailable', failed: true, diagnostic:'NOTISEND_HTTP_401'})};
   await run({}, {...options, now});
   assert.equal(privateRunReport(store.state).jobStatus, 'completed');
   assert.equal(privateRunReport(store.state).mail.emailDeliveryOk, false);
-  await assert.rejects(run({}, {...options, now: now + 300000}),
-    {code: 'MONITOR_EMAIL_DELIVERY_FAILED'});
+  await assert.rejects(run({}, {...options, now: now + 300000}), error =>
+    error.code === 'MONITOR_EMAIL_DELIVERY_FAILED' &&
+    error.diagnostic === 'NOTISEND_HTTP_401');
   await run({}, {...options, now: now + 600000,
     delivery: async () => ({status: 'delivered', failed: false})});
   const report = privateRunReport(store.state);

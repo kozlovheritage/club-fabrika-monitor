@@ -67,8 +67,11 @@ test('provider queueing is not an outage; persistent confirmed transport failure
   assert.deepEqual(signals, ['tick']);
   signals.length = 0;
   await assert.rejects(execute({}, {token, monitor: async () => ({...healthy,
-    deliveryStatus: 'queued', emailDeliveryOk: false, mailOperationalOk: false}),
-  signal: async state => {signals.push(state); return true;}}));
+    deliveryStatus: 'queued', emailDeliveryOk: false, mailOperationalOk: false,
+    deliveryDiagnostic:'NOTISEND_HTTP_429'}),
+  signal: async state => {signals.push(state); return true;}}), error =>
+    error.code === 'MONITOR_EMAIL_DELIVERY_FAILED' &&
+    error.diagnostic === 'NOTISEND_HTTP_429');
   assert.deepEqual(signals, ['fail']);
 });
 test('failed heartbeat submission fails visibly without discarding the completed worker result', async () => {
